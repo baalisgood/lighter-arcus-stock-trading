@@ -1,0 +1,18 @@
+# Public quotes only. This gross-spread screen is not a net-profit or execution signal.
+exchanges: [lighter, arcus]
+symbols: [MU-USDC-PERP, SNDK-USDC-PERP, NVDA-USDC-PERP, AMD-USDC-PERP, INTC-USDC-PERP]
+thresholds:
+  min_spread_pct: 0.30
+  min_funding_rate_diff: 0.01
+performance:
+  analysis_interval_ms: 100
+  ui_refresh_interval_ms: 1000
+health_check:
+  interval: 10
+  data_timeout: 10
+spread_history:
+  enabled: true
+  data_dir: data/stock_spread_history
+  sampling:
+    interval_seconds: 60
+    strategy: max
