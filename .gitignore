@@ -47,3 +47,6 @@ cache/
 *.tar*
 *.zip
 *.gz
+
+# Empty public credential template only.
+!.env.stock.example

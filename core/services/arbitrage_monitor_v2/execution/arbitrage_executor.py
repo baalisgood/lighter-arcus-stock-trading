@@ -3225,6 +3225,8 @@ class ArbitrageExecutor:
     def _validate_pair_quantity(self, request):
         constraints = getattr(self, "market_constraints", {}).get((request.buy_symbol or request.symbol).split("-")[0])
         if not constraints:
+            if getattr(self, "stock_profile", False):
+                raise ValueError("Stock market constraints unavailable")
             return
         quantity = request.quantity
         step = Decimal(str(constraints["quantity_step"]))
@@ -3232,7 +3234,7 @@ class ArbitrageExecutor:
         if not quantity.is_finite() or quantity < minimum or quantity % step:
             raise ValueError("双腿数量不符合共同精度或最小量")
         for exchange, price in ((request.exchange_buy, request.price_buy), (request.exchange_sell, request.price_sell)):
-            if not price.is_finite() or price <= 0 or price * quantity < Decimal(str(constraints["min_notional_by_exchange"].get(exchange, 0))):
+            if not price.is_finite() or price <= 0 or ((request.is_open or not getattr(self, "stock_profile", False)) and price * quantity < Decimal(str(constraints["min_notional_by_exchange"].get(exchange, 0)))):
                 raise ValueError("双腿订单金额低于交易所最小金额")
 
     def _remember_confirmed_fill(self, adapter, order):

@@ -86,7 +86,11 @@ class ArcusAdapter(ExchangeAdapter):
         if signature:
             headers.update({'X-Timestamp': str(nonce), 'X-Signature': signature})
         try:
-            async with self._session.request(method, self.base_url + path, params=query, json=body, headers=headers) as response:
+            async with self._session.request(method, self.base_url + path, params=query, json=body, headers=headers, allow_redirects=False) as response:
+                if 300 <= response.status < 400:
+                    if method != "GET":
+                        raise OrderStateUnknownError("arcus", client_id=(body or {}).get("clientId"))
+                    raise ArcusRequestRejectedError("Arcus redirect rejected")
                 if response.status >= 500 and method != 'GET':
                     raise OrderStateUnknownError('arcus', client_id=(body or {}).get('clientId'))
                 if response.status >= 400:
@@ -186,7 +190,7 @@ class ArcusAdapter(ExchangeAdapter):
             best = book.best_ask if side == OrderSide.BUY else book.best_bid
             if not best:
                 raise ValueError('Arcus book is empty')
-            slippage = D(str(params.get('slippage', params.get('slippage_tolerance_pct', '.005'))))
+            slippage = D('.0001') if self.config.extra_params.get('stock_profile') else D(str(params.get('slippage', params.get('slippage_tolerance_pct', '.005'))))
             if not 0 <= slippage <= D('.1'):
                 raise ValueError('Arcus market slippage must be 0..10%')
             price = best.price * (1 + slippage if side == OrderSide.BUY else 1 - slippage)
@@ -201,6 +205,8 @@ class ArcusAdapter(ExchangeAdapter):
                 raise ValueError('Arcus limit order requires price')
             price = D(str(price)); tif = params.get('timeInForce', 'GTT').upper()
             tif = {'GTC': 'GTT', 'POST_ONLY': 'ALO'}.get(tif, tif)
+        if self.config.extra_params.get("stock_profile") and not reduce_only and amount * price > D(500):
+            raise ValueError("Stock protected order nominal exceeds 500 USDC")
         self._validate_order(market, amount, price, reduce_only)
         nonce = self._nonce(); expiry = nonce // 1000 + 32 * 24 * 3600 * 1000000
         client = params.get('clientId') or uuid.uuid4().hex

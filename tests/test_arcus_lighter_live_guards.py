@@ -146,7 +146,7 @@ def test_stock_launcher_rejects_live_and_duplicate_lock():
     result = subprocess.run(command + ['live'], cwd=root, capture_output=True, text=True)
     assert result.returncode == 2 and 'live is unavailable' in result.stderr
     (root / 'run').mkdir(exist_ok=True)
-    with (root / 'run/stock_monitor.lock').open('a') as locked:
+    with (root / 'run/stock.lock').open('a') as locked:
         fcntl.flock(locked, fcntl.LOCK_EX | fcntl.LOCK_NB)
         result = subprocess.run(command, cwd=root, env={**os.environ, 'STOCK_MONITOR_PYTHON': sys.executable}, capture_output=True, text=True, timeout=5)
         assert result.returncode != 0 and 'already running' in result.stderr
@@ -230,7 +230,7 @@ def test_public_websocket_forces_tls_and_sends_no_auth(monkeypatch):
         sdk_connections.append(actual_connect(url, **kwargs))
         return Connection()
     async def listen(_socket): ws._running = len(sdk_connections) < 2
-    monkeypatch.setattr(module.websockets, 'connect', connect)
+    monkeypatch.setattr(module, 'connect', connect)
     ws._subscribed_market_stats = {164}; ws._subscribed_markets = {164}
     ws._listen_websocket = listen
     ws._send_account_subscriptions = AsyncMock(side_effect=AssertionError('private subscription'))
@@ -268,7 +268,7 @@ def test_stock_launcher_drops_inherited_credentials_and_pythonpath(tmp_path):
     assert result.returncode == 0
     names = {line.partition('=')[0] for line in result.stdout.splitlines()}
     assert not names & {'LIGHTER_API_KEY_PRIVATE_KEY', 'ARCUS_API_KEY', 'PYTHONPATH', 'STOCK_MONITOR_PYTHON'}
-    assert names <= {'PATH', 'HOME', 'TERM', 'LANG', 'PYTHONDONTWRITEBYTECODE', 'PWD', 'SHLVL', '_'}
+    assert names <= {'PATH', 'HOME', 'TERM', 'LANG', 'PYTHONDONTWRITEBYTECODE', 'PWD', 'SHLVL', '_', 'STOCK_LAUNCHER_ROOT'}
 
 
 def test_receiver_default_mode_preserves_empty_snapshot_filter():
@@ -313,7 +313,7 @@ def test_arcus_public_ws_initial_and_reconnect_disable_system_proxy_only_in_publ
         options_seen.append(kwargs)
         sdk_connections.append(actual_connect(url, **kwargs))
         return Socket(len(options_seen))
-    monkeypatch.setattr(module.websockets, 'connect', connect)
+    monkeypatch.setattr(module, 'connect', connect)
     async def scenario():
         await ws.connect()
         await ws._task
@@ -339,8 +339,8 @@ def test_public_lighter_readonly_url_is_official_and_normal_mode_keeps_url(monke
     official = LighterBase.TESTNET_WS_URL if testnet else LighterBase.MAINNET_WS_URL
     public = LighterBase({'public_only': True, 'testnet': testnet, 'ws_url': 'wss://invalid.example/stream'})
     normal = LighterBase({'testnet': testnet})
-    overridden = LighterBase({'testnet': testnet, 'ws_url': official + '?existing=1'})
+    with pytest.raises(ValueError, match='endpoints'):
+        LighterBase({'testnet': testnet, 'ws_url': official + '?existing=1'})
     assert public.ws_url == official + '?readonly=true'
     assert normal.ws_url == official
-    assert overridden.ws_url == official + '?existing=1'
 

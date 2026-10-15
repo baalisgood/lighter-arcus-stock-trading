@@ -114,6 +114,11 @@ class LighterBase:
             logger.warning(f"⚠️ ws_url为空，使用默认值: {default_ws}")
             self.ws_url = default_ws
 
+        official_api = self.TESTNET_URL if self.testnet else self.MAINNET_URL
+        official_ws = self.TESTNET_WS_URL if self.testnet else self.MAINNET_WS_URL
+        if not self.public_only and (self.base_url != official_api or self.ws_url != official_ws):
+            raise ValueError("Lighter endpoints must match the selected network")
+
         # 市场信息缓存
         self._markets_cache: Dict[int, Dict[str, Any]] = {}
         self._symbol_to_market_index: Dict[str, int] = {}
@@ -209,19 +214,23 @@ class LighterBase:
 
         try:
             # 新版签名
-            return SignerClient(
+            client = SignerClient(
                 url=base_url,
                 account_index=account_index,
                 api_private_keys=api_private_keys,
             )
         except TypeError:
             # 兼容旧版签名
-            return SignerClient(
+            client = SignerClient(
                 url=base_url,
                 private_key=api_key_private_key,
                 account_index=account_index,
                 api_key_index=api_key_index,
             )
+
+        from .lighter_transport import harden_client
+        harden_client(client.api_client, base_url)
+        return client
 
     def get_base_url(self) -> str:
         """获取REST API基础URL"""

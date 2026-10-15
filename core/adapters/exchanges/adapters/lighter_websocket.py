@@ -36,6 +36,7 @@ from decimal import Decimal
 from datetime import datetime
 from collections import deque
 import asyncio
+from .secure_websocket import connect
 import logging
 import math
 import json
@@ -983,7 +984,7 @@ class LighterWebSocket(LighterBase):
             f"📨 [Lighter] WS批量交易请求: id={request_id}, 笔数={len(tx_types)}")
 
         try:
-            async with websockets.connect(self.ws_url, ping_interval=None) as ws:
+            async with connect(self.ws_url, ping_interval=None) as ws:
                 try:
                     greeting = await asyncio.wait_for(ws.recv(), timeout=5.0)
                     logger.debug(f"[Lighter] WS握手: {greeting}")
@@ -2209,7 +2210,7 @@ class LighterWebSocket(LighterBase):
             try:
                 # 🔥 SSL 配置：从环境变量读取
                 ssl_context = None
-                verify_ssl = self.public_only or os.getenv('LIGHTER_VERIFY_SSL', 'true').lower() == 'true'
+                verify_ssl = True
                 if not verify_ssl:
                     ssl_context = ssl.create_default_context()
                     ssl_context.check_hostname = False
@@ -2219,7 +2220,7 @@ class LighterWebSocket(LighterBase):
                     # 使用默认上下文（会加载系统/certifi证书）
                     ssl_context = ssl.create_default_context()
                 
-                async with websockets.connect(
+                async with connect(
                     self.ws_url,
                     ping_interval=None,
                     ping_timeout=None,

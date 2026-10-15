@@ -1,0 +1,17 @@
+arbitrage_execution:
+  enabled: true
+  exchange_order_modes:
+    lighter:
+      order_mode: market
+    arcus:
+      order_mode: market
+  order_execution:
+    enable_dual_limit_mode: false
+    max_slippage: 0.0001
+  exchange_fees:
+    lighter:
+      limit_fee_rate: 0.00028
+      market_fee_rate: 0.00028
+    arcus:
+      limit_fee_rate: 0.000225
+      market_fee_rate: 0.000225

@@ -164,6 +164,14 @@ class LighterAdapter(ExchangeAdapter):
                     'subscription_mode': {'mode': 'predefined', 'predefined': {
                         'symbols': [], 'data_types': {'ticker': True, 'orderbook': True,
                                                      'trades': False, 'user_data': False}}}}
+        if (config.extra_params or {}).get("stock_profile"):
+            return {"stock_profile": True, "strict_order_state": True, "slippage": "0.0001",
+                    "testnet": config.testnet, "auth_enabled": True,
+                    "api_key_private_key": config.api_key_private_key,
+                    "account_index": config.account_index, "api_key_index": config.api_key_index,
+                    "subscription_mode": {"mode": "predefined", "predefined": {
+                        "symbols": [], "data_types": {"ticker": True, "orderbook": True,
+                                                      "trades": False, "user_data": True}}}}
         # 🔥 优先从配置文件加载完整配置（包括api_config结构）
         try:
             lighter_config = self._load_lighter_config()

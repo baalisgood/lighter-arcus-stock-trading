@@ -1,0 +1,66 @@
+system_mode:
+  stock_profile: true
+  monitor_only: false
+  data_freshness_seconds: 2.5
+  bootstrap_positions_on_startup: true
+  bootstrap_positions_block_open_until_success: true
+  bootstrap_positions_block_open_on_mismatch: true
+  bootstrap_positions_qty_tolerance: 0
+  bootstrap_positions_empty_confirm_attempts: 10
+  bootstrap_positions_empty_confirm_interval_seconds: 1
+decision:
+  deduct_fees: true
+  exchange_fee_config:
+    lighter:
+      limit_fee_rate: 0.00028
+      market_fee_rate: 0.00028
+    arcus:
+      limit_fee_rate: 0.000225
+      market_fee_rate: 0.000225
+risk_control:
+  open_only_close:
+    low_balance:
+      enabled: false
+    max_exchange_position_value:
+      enabled: true
+      max_value_usdc: 8000
+    dynamic_max_exchange_position_value:
+      enabled: false
+    price_volatility:
+      enabled: false
+      trigger_symbols: []
+  balance_management:
+    min_balance_warning: 0
+    min_balance_close_position: 0
+    sound_alarm_enabled: false
+default_config:
+  grid_config:
+    initial_spread_threshold: 0.1
+    grid_step: 0.05
+    max_segments: 4
+    segment_quantity_ratio: 1
+    segment_partial_order_ratio: 1
+    min_partial_order_quantity: 0
+    profit_per_segment: 0.1
+    spread_persistence_seconds: 5
+    strict_persistence_check: true
+    require_orderbook_liquidity: true
+    orderbook_aggregate_levels: 1
+    skip_orderbook_liquidity_exchanges: []
+    slippage_tolerance: 0.0001
+    price_stability_enabled: false
+  quantity_config:
+    base_quantity: 0
+    quantity_mode: value
+    target_value_usdc: 500
+    quantity_precision: 12
+    min_order_size: 0
+  risk_config:
+    max_position_value: 2000
+    max_loss_percent: 1
+symbol_configs:
+  MU-USDC-PERP: {}
+  SNDK-USDC-PERP: {}
+  NVDA-USDC-PERP: {}
+  AMD-USDC-PERP: {}
+  INTC-USDC-PERP: {}
