@@ -761,17 +761,17 @@ class SpreadPipeline:
                     return None
                 age = time.time() - stamp.timestamp()
                 funding_cfg = orc.config_manager.get_config(symbol).grid_config.basis_config
-                if age < -1 or age > float(funding_cfg.get("funding_max_age_seconds", 60)):
+                if not math.isfinite(age) or age < -1 or age > float(funding_cfg.get("funding_max_age_seconds", 300)):
                     return None
                 if exchange.lower() == "arcus":
                     raw = getattr(ticker, "raw_data", None) or {}
                     if "fundingRate" not in raw or not math.isfinite(float(raw["fundingRate"])):
                         return None
                     next_at = raw.get("nextFundingAt")
-                    if next_at is not None:
+                    if "nextFundingAt" in raw:
                         from datetime import datetime
                         expiry = float(next_at) if isinstance(next_at, (int, float)) else datetime.fromisoformat(str(next_at).replace("Z", "+00:00")).timestamp()
-                        if expiry <= time.time():
+                        if not math.isfinite(expiry) or expiry <= time.time():
                             return None
                 values.append(float(rate) / 8 * 100)  # Adapter contract: 8-hour decimal; decisions: hourly percent.
             buy, sell = values

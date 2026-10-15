@@ -110,6 +110,14 @@ def parse_args():
     return parser.parse_args()
 
 
+def _stock_basis_state_path(config_path):
+    import yaml
+    profile = yaml.safe_load(Path(config_path).read_text())
+    if profile.get("system_mode", {}).get("stock_profile", False) and profile.get("default_config", {}).get("grid_config", {}).get("basis_config", {}).get("enabled", False):
+        return Path(__file__).resolve().parent / "data" / "stock_basis_state.json"
+    return None
+
+
 async def main():
     """主入口函数"""
     args = parse_args()
@@ -133,7 +141,8 @@ async def main():
             monitor_config_path=args.monitor_config,
             multi_exchange_config_path=args.multi_exchange_config,
             execution_config_path=args.execution_config,
-            debug_config=debug_config
+            debug_config=debug_config,
+            basis_state_path=_stock_basis_state_path(args.config)
         )
 
         # 启动系统

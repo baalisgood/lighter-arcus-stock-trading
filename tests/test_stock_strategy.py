@@ -41,8 +41,8 @@ def test_time_ema_one_hz_gap_and_hour_drift():
     for t in range(1,3601):s.observe(t,1)
     assert s.ready and s.stable
     s.observe(3601,1000);assert not s.stable
-    s.observe(3605,1);assert not s.ready and s.started==3605
-    s.observe(3606,float('nan'));assert s.ema is None
+    s.observe(3605,1);assert not s.ready and s.started==0
+    s.observe(3606,float('nan'));assert s.ema is not None and not s.ready
 
 @pytest.mark.parametrize('basis,buy,raw,adjusted',[(1,'arcus',1.3,.3),(-1,'arcus',-.7,.3),(1,'lighter',-.7,.3),(-1,'lighter',1.3,.3)])
 def test_basis_sign_raw_negative_and_close_direction(basis,buy,raw,adjusted):
@@ -128,7 +128,7 @@ def test_cached_funding_hourly_conversion_missing_stale_not_zero():
     f=pipeline._get_funding_rate_data(SYMBOL,'lighter','arcus')
     assert f.funding_rate_buy==pytest.approx(.1) and f.funding_rate_sell==pytest.approx(.2)
     cache['arcus'].raw_data={};assert pipeline._get_funding_rate_data(SYMBOL,'lighter','arcus') is None
-    cache['arcus'].raw_data={'fundingRate':'.002'};cache['arcus'].timestamp=now-timedelta(seconds=61)
+    cache['arcus'].raw_data={'fundingRate':'.002'};cache['arcus'].timestamp=now-timedelta(seconds=301)
     assert pipeline._get_funding_rate_data(SYMBOL,'lighter','arcus') is None
 
 
@@ -198,11 +198,11 @@ def test_lighter_actual_signed_payload_inward_tick_bound(side,bound,expected):
 
 
 def test_actual_bbo_stale_invalid_interrupts_basis_warmup():
-    e=engine();now=__import__('time').time()
+    e=engine();now=float(int(__import__('time').time()))
     def book(px,stamp):return OrderBookData(SYMBOL,[OrderBookLevel(D(px),D(1))],[OrderBookLevel(D(px),D(1))],datetime.fromtimestamp(stamp),received_timestamp=datetime.fromtimestamp(stamp))
     e.observe_basis(SYMBOL,{'lighter':book(101,now),'arcus':book(100,now)},now=now)
     assert e._basis_states[SYMBOL].ema==pytest.approx(1)
     e.observe_basis(SYMBOL,{'lighter':book(101,now-10),'arcus':book(100,now)},now=now+1)
-    assert e._basis_states[SYMBOL].ema is None
+    assert e._basis_states[SYMBOL].ema==pytest.approx(1) and not e._basis_states[SYMBOL].ready
     e.observe_basis(SYMBOL,{'lighter':book(101,now+2),'arcus':book(100,now+2)},now=now+2)
-    assert e._basis_states[SYMBOL].started==now+2 and not e._basis_states[SYMBOL].ready
+    assert e._basis_states[SYMBOL].started==now and not e._basis_states[SYMBOL].ready

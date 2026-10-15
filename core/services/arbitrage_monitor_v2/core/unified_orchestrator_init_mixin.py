@@ -370,7 +370,8 @@ class UnifiedOrchestratorInitMixin:
         execution_config_path: Optional[Path] = None,
         monitor_config_path: Optional[Path] = None,
         multi_exchange_config_path: Optional[Path] = None,
-        debug_config: Optional[DebugConfig] = None
+        debug_config: Optional[DebugConfig] = None,
+        basis_state_path: Optional[Path] = None
     ):
         """
         初始化统一调度器
@@ -486,7 +487,7 @@ class UnifiedOrchestratorInitMixin:
 
         # 🔥 初始化V2统一决策引擎（总量驱动 + 剥头皮状态机）
         self.decision_engine = UnifiedDecisionEngine(
-            config_manager=self.config_manager
+            config_manager=self.config_manager, basis_state_path=basis_state_path
         )
         # 注入避让控制器
         self.decision_engine._backoff_controller = self.error_backoff_controller

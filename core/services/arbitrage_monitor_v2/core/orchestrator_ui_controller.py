@@ -488,7 +488,33 @@ class OrchestratorUIController:
 
             symbol = orc.monitor_config.symbols[0]
 
-            if (
+            engine = orc.decision_engine
+            unified = callable(getattr(engine, "_config", None)) and callable(getattr(engine, "_build_grid_thresholds", None))
+            if unified:
+                pair_keys = [pair.trading_pair_id for pair in getattr(orc, "multi_exchange_pairs", [])
+                             if pair.normalized_symbol() == symbol.upper()]
+                symbol = next((key for key in [symbol, *pair_keys]
+                               if key in engine.positions and engine.positions[key].total_quantity > 0),
+                              pair_keys[0] if len(pair_keys) == 1 else symbol)
+                config = engine._config(symbol)
+                opens, closes = engine._build_grid_thresholds(config)
+                position = engine.positions.get(symbol)
+                segments = position.get_open_segments() if position else []
+                previous_quantity = Decimal("0")
+                for i, (opening, closing) in enumerate(zip(opens, closes), 1):
+                    if config.quantity_config.quantity_mode == "value":
+                        cumulative = engine._quantity_after_fifo_close(symbol, config.quantity_config.target_value_usdc * i)
+                    else:
+                        cumulative = min(sum((seg.open_quantity for seg in segments), Decimal("0")), config.quantity_config.base_quantity * i)
+                    actual_quantity = max(Decimal("0"), cumulative - previous_quantity)
+                    previous_quantity = cumulative
+                    grid_data["segments"].append({
+                        "level": f"T{i}", "open_threshold": float(opening),
+                        "close_threshold": float(closing),
+                        "target_quantity": None if config.quantity_config.quantity_mode == "value" else float(config.quantity_config.base_quantity),
+                        "actual_quantity": float(actual_quantity),
+                    })
+            elif (
                 hasattr(orc.decision_engine, "grid_configs")
                 and symbol in orc.decision_engine.grid_configs
             ):
@@ -501,8 +527,7 @@ class OrchestratorUIController:
                         (i * grid_config.grid_step)
                     )
                     if i == 0:
-                        # 🔥 T0 = T1 * 0.4（40%）
-                        close_threshold = grid_config.min_profit_pct * 0.4
+                        close_threshold = grid_config.min_profit_pct * getattr(grid_config, "first_close_ratio", 0.4)
                     else:
                         close_threshold = (
                             grid_config.min_profit_pct
@@ -551,22 +576,6 @@ class OrchestratorUIController:
                 if start_time:
                     grid_data["spread_duration"] = time.time() - start_time
 
-            if hasattr(orc.decision_engine, "should_open"):
-                should_open, quantity, reason = orc.decision_engine.should_open(
-                    symbol)
-                if should_open:
-                    remaining_time = max(0, 3.0 - grid_data["spread_duration"])
-                    grid_data["next_action"] = f"等待{remaining_time:.1f}s后开仓"
-                elif hasattr(orc.decision_engine, "should_close"):
-                    should_close, quantity, reason, _ = orc.decision_engine.should_close(
-                        symbol
-                    )
-                    if should_close:
-                        remaining_time = max(
-                            0, 3.0 - grid_data["spread_duration"])
-                        grid_data["next_action"] = f"等待{remaining_time:.1f}s后平仓"
-                    else:
-                        grid_data["next_action"] = reason or "等待价差触发条件"
 
         except Exception as exc:
             self._logger.debug(f"[统一调度] 收集网格UI数据失败: {exc}")

@@ -159,9 +159,12 @@ default_config:
       drift_seconds: 3600
       max_drift_pct: 0.1
       max_gap_seconds: 3
+      recovery_seconds: 60
+      reset_after_seconds: 600
+      checkpoint_interval_seconds: 60
       funding_budget_enabled: true
       funding_horizon_hours: 1
-      funding_max_age_seconds: 60
+      funding_max_age_seconds: 300
     stock_session:
       offhours_threshold_pct: 0.18
       calendar_valid_years:

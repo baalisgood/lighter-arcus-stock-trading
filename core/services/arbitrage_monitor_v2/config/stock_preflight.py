@@ -24,10 +24,12 @@ def merge_stock_grid(default, specific):
 
 def validate_signal_settings(grid):
     basis = grid['basis_config']
-    for key in ('ema_seconds', 'warmup_seconds', 'drift_seconds', 'max_drift_pct', 'max_gap_seconds', 'funding_horizon_hours', 'funding_max_age_seconds'):
+    for key in ('ema_seconds', 'warmup_seconds', 'drift_seconds', 'max_drift_pct', 'max_gap_seconds', 'funding_horizon_hours', 'funding_max_age_seconds', 'recovery_seconds', 'reset_after_seconds', 'checkpoint_interval_seconds'):
         positive(basis[key], key)
     if basis['warmup_seconds'] < basis['drift_seconds']:
         raise ValueError('Basis warmup must cover drift history')
+    if not basis['max_gap_seconds'] < basis['recovery_seconds'] <= basis['reset_after_seconds'] or basis['checkpoint_interval_seconds'] > basis['reset_after_seconds']:
+        raise ValueError('Invalid basis recovery/checkpoint intervals')
     schedule = grid['stock_session']
     positive(schedule['offhours_threshold_pct'], 'offhours threshold')
     years = schedule.get('calendar_valid_years', [])

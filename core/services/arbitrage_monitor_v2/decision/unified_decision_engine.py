@@ -14,11 +14,12 @@
 4. 执行拆单操作（开仓/平仓）
 """
 
+from ..utils.stock_basis_cache import BasisCache, new_basis_state
 import logging
 import math
 import time
 from dataclasses import replace
-from ..utils.stock_signal import BasisState, cash_threshold
+from ..utils.stock_signal import cash_threshold
 from .arbitrage_decision import _round_trip_fee_breakdown
 from typing import Optional, Dict, Tuple, List
 from datetime import datetime
@@ -44,7 +45,7 @@ logger.propagate = False
 class UnifiedDecisionEngine:
     """统一决策引擎（总量驱动 + 剥头皮状态机）"""
 
-    def __init__(self, config_manager: SegmentedConfigManager, *, deduct_fees: bool = True, exchange_fee_config=None, exchange_order_modes=None):
+    def __init__(self, config_manager: SegmentedConfigManager, *, deduct_fees: bool = True, exchange_fee_config=None, exchange_order_modes=None, basis_state_path=None):
         """
         初始化统一决策引擎
 
@@ -58,7 +59,12 @@ class UnifiedDecisionEngine:
 
         # 持仓管理（symbol级聚合）
         self._unfavorable_funding = {}
-        self._basis_states = {}
+        self._basis_cache = BasisCache(basis_state_path, {
+            symbol: config_manager.get_config(symbol).grid_config.basis_config
+            for symbol in set(config_manager.symbol_configs) | set(getattr(config_manager, "_config_aliases", {}))
+            if config_manager.get_config(symbol).grid_config.basis_config.get("enabled", False)
+        }, logger)
+        self._basis_states = self._basis_cache.load(time.time())
         self._signal_prices = {}
         self.positions: Dict[str, SegmentedPosition] = {}
         # 套利对级别持仓：symbol -> pair_key -> SegmentedPosition
@@ -114,10 +120,7 @@ class UnifiedDecisionEngine:
         cfg = self._config(symbol).grid_config.basis_config
         if not cfg.get("enabled", False):
             return
-        state = self._basis_states.setdefault(symbol, BasisState(
-            window=float(cfg.get("ema_seconds", 3600)), warmup=float(cfg.get("warmup_seconds", 3600)),
-            drift_window=float(cfg.get("drift_seconds", 3600)), drift_limit=float(cfg.get("max_drift_pct", .10)),
-            max_gap=float(cfg.get("max_gap_seconds", 3))))
+        state = self._basis_states.setdefault(symbol, new_basis_state(cfg))
         value = None
         try:
             mids = {}
@@ -126,7 +129,7 @@ class UnifiedDecisionEngine:
                 stamp = getattr(ob, "received_timestamp", None) or getattr(ob, "timestamp", None)
                 source_stamp = getattr(ob, "timestamp", None)
                 clock = time.time() if now is None else now
-                if stamp is None or source_stamp is None or any(clock - ts.timestamp() > state.max_gap or clock - ts.timestamp() < -1 for ts in (stamp, source_stamp)):
+                if stamp is None or source_stamp is None or any(not math.isfinite(ts.timestamp()) or not -1 <= clock - ts.timestamp() <= state.max_gap for ts in (stamp, source_stamp)):
                     raise ValueError("stale BBO")
                 bid, ask = ob.bids[0], ob.asks[0]
                 prices = [Decimal(str(bid.price)), Decimal(str(ask.price))]
@@ -137,13 +140,15 @@ class UnifiedDecisionEngine:
             value = float((mids["lighter"] - mids["arcus"]) / mids["arcus"] * 100)
         except (KeyError, IndexError, ValueError, TypeError, AttributeError):
             pass
-        state.observe(time.time() if now is None else now, value)
+        clock = time.time() if now is None else now
+        state.observe(clock, value)
+        self._basis_cache.checkpoint(self._basis_states, clock)
 
     def basis_ready(self, symbol):
         if not self._config(symbol).grid_config.basis_config.get("enabled", False):
             return True
         state = self._basis_states.get(symbol)
-        return bool(state and state.stable and state.last is not None and time.time() - state.last <= state.max_gap)
+        return bool(state and state.stable and state.last is not None and 0 <= time.time() - state.last <= state.max_gap)
 
     def adjusted_open_spread(self, symbol, spread):
         if not self._config(symbol).grid_config.basis_config.get("enabled", False):
@@ -167,7 +172,7 @@ class UnifiedDecisionEngine:
             self._unfavorable_funding.pop(symbol, None)
             return None
         previous = self._unfavorable_funding.get(symbol)
-        max_gap = float(config.grid_config.basis_config.get("funding_max_age_seconds", 60))
+        max_gap = float(config.grid_config.basis_config.get("funding_max_age_seconds", 300))
         start = previous[0] if previous and 0 <= now - previous[1] <= max_gap else now
         self._unfavorable_funding[symbol] = (start, now)
         if now - start >= config.risk_config.max_unfavorable_funding_hours * 3600:
@@ -265,7 +270,7 @@ class UnifiedDecisionEngine:
         self._close_minimums[symbol] = self.minimum_close_quantity(symbol, spread)
         actual = self._get_actual_position(symbol)
         state = self._basis_states.get(symbol)
-        if cfg.grid_config.basis_config.get("enabled", False) and not (state and state.ready and state.last is not None and time.time() - state.last <= state.max_gap):
+        if cfg.grid_config.basis_config.get("enabled", False) and not (state and state.ready and state.last is not None and 0 <= time.time() - state.last <= state.max_gap):
             delta = actual
         else:
             target = self._calculate_target_position_by_spread(symbol, self.close_relative_spread(symbol, spread), cfg)
@@ -299,6 +304,7 @@ class UnifiedDecisionEngine:
         basis_cfg = config.grid_config.basis_config
         funding_cost = self.expected_funding_cost(symbol, funding_rate_data)
         if funding_cost is None:
+            self._log_info_throttle(f"funding_unavailable_{symbol}", f"{symbol} 资金费率不可用，等待有效且不超过300秒的费率", interval=60)
             self._reset_spread_persistence(self._build_persistence_key(symbol, spread_data))
             return False, Decimal("0")
         self._signal_prices[symbol] = max(Decimal(str(spread_data.price_buy)), Decimal(str(spread_data.price_sell))) * (1 + Decimal(str(config.grid_config.slippage_tolerance or 0))) ** 2
@@ -631,7 +637,7 @@ class UnifiedDecisionEngine:
 
         if config.grid_config.basis_config.get("enabled", False):
             state = self._basis_states.get(symbol)
-            usable = bool(state and state.ready and state.last is not None and time.time() - state.last <= state.max_gap)
+            usable = bool(state and state.ready and state.last is not None and 0 <= time.time() - state.last <= state.max_gap)
             if not usable:
                 qty = self._calculate_order_quantity(symbol, actual, config, is_close=True)
                 position = self.positions[symbol]

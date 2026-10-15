@@ -13,36 +13,58 @@ class BasisState:
     drift_window: float = 3600.0
     drift_limit: float = 0.10
     max_gap: float = 3.0
+    recovery_seconds: float = 60.0
+    reset_after: float = 600.0
     ema: float | None = None
     started: float | None = None
     last: float | None = None
+    valid_seconds: float = 0.0
+    recovery_started: float | None = None
+    recovering: bool = False
     history: deque = field(default_factory=deque)
     ready: bool = False
     stable: bool = False
 
     def reset(self):
-        self.ema = self.started = self.last = None
+        self.ema = self.started = self.last = self.recovery_started = None
+        self.valid_seconds = 0.0
         self.history.clear()
-        self.ready = self.stable = False
+        self.ready = self.stable = self.recovering = False
 
     def observe(self, now, value):
-        if value is None or not isfinite(value):
+        if not isfinite(now) or (self.last is not None and now < self.last):
             self.reset()
             return
-        if self.last is not None and (now < self.last or now - self.last > self.max_gap):
+        gap = None if self.last is None else now - self.last
+        if gap is not None and gap > self.reset_after:
             self.reset()
-        if self.last is not None and now - self.last < 1.0:
+            gap = None
+        if value is None or not isfinite(value):
+            self.ready = self.stable = False
+            self.recovering = True
+            self.recovery_started = None
+            return
+        if gap is not None and gap > self.max_gap:
+            self.recovering = True
+            self.recovery_started = None
+        if gap is not None and gap < 1.0:
             return
         if self.last is None:
             self.started, self.ema = now, value
-        else:
-            self.ema += (1 - exp(-(now - self.last) / self.window)) * (value - self.ema)
+        elif gap <= self.max_gap and (not self.recovering or self.recovery_started is not None):
+            self.valid_seconds += gap
+            self.ema += (1 - exp(-gap / self.window)) * (value - self.ema)
+        # The first sample after an outage must not weight the offline interval.
+        if self.recovering and self.recovery_started is None:
+            self.recovery_started = now
         self.last = now
         self.history.append((now, self.ema))
         cutoff = now - self.drift_window
         while len(self.history) > 1 and self.history[1][0] <= cutoff:
             self.history.popleft()
-        self.ready = now - self.started >= max(self.warmup, self.drift_window)
+        mature = self.valid_seconds >= max(self.warmup, self.drift_window)
+        recovered = not self.recovering or now - self.recovery_started >= self.recovery_seconds
+        self.ready = mature and recovered
         self.stable = self.ready and abs(self.ema - self.history[0][1]) <= self.drift_limit
 
 
