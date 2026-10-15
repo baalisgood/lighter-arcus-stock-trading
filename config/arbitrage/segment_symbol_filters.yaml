@@ -4,6 +4,7 @@ enabled_symbols:
 - AMD-USDC-PERP
 - NVDA-USDC-PERP
 - INTC-USDC-PERP
+- SPCX-USDC-PERP
 enabled_exchanges:
 - lighter
 - arcus

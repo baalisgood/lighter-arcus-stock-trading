@@ -53,6 +53,10 @@ arbitrage_execution:
       single_order_quantity: 2.617
       max_position_quantity: 10.468
       quantity_precision: 3
+    SPCX-USDC-PERP:
+      single_order_quantity: 1.6816
+      max_position_quantity: 6.7264
+      quantity_precision: 4
   exchange_order_modes:
     arcus:
       order_mode: market

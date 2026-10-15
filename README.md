@@ -1,6 +1,6 @@
 # Lighter–Arcus stock perpetual arbitrage
 
-MU, SNDK, AMD, NVDA and INTC on the original unified segmented trading engine. Trading decisions, execution, account reconciliation and risk controls use the original code. The stock-specific runtime and hard-coded 1,500 USDC limit have been removed. Stock symbols, quantities and monetary limits are YAML configuration.
+MU, SNDK, AMD, NVDA, INTC and SPCX on the original unified segmented trading engine. Trading decisions, execution, account reconciliation and risk controls use the original code. The stock-specific runtime and hard-coded 1,500 USDC limit have been removed. Stock symbols, quantities and monetary limits are YAML configuration.
 
 ## Install and run
 
@@ -26,7 +26,7 @@ The wrapper clears inherited credentials/environment, uses this directory's `.en
 
 ## Configuration and target
 
-Edit `config/arbitrage/arbitrage_segmented.yaml` for quantities, thresholds and risk limits. `monitor_lighter_arcus.yaml` and `multi_exchange_arbitrage.yaml` select only the five stocks; `arbitrage_lighter_arcus.yaml` configures the original execution modes/fees. `multi_leg_pairs.yaml` and `extra_symbols.yaml` contain no additional symbols.
+Edit `config/arbitrage/arbitrage_segmented.yaml` for quantities, thresholds and risk limits. `monitor_lighter_arcus.yaml` and `multi_exchange_arbitrage.yaml` select only the six stocks; `arbitrage_lighter_arcus.yaml` configures the original execution modes/fees. `multi_leg_pairs.yaml` and `extra_symbols.yaml` contain no additional symbols.
 
 | Parameter | Default |
 | --- | --- |
@@ -38,6 +38,8 @@ Edit `config/arbitrage/arbitrage_segmented.yaml` for quantities, thresholds and 
 | Grid step / maximum grids | 0.09 percentage points / 2 |
 | Per-leg slippage tolerance | 0.01% |
 
+All six stocks share the same 5,000 USDC per-venue ceiling. Six individual 1,000 USDC stock caps do not permit 6,000 USDC combined exposure, and the budget is not forcibly divided equally among stocks.
+
 All monetary values above are configurable; no stock runtime imposes a second monetary ceiling. These are nominal exposure limits, not a guarantee of using all capital, margin requirements or maximum loss. The effective nominal ceiling is the smaller of the static cap and account total × equity_multiplier; raising only the static cap can still leave the dynamic cap binding. Both settings are configurable. Other original account, execution, freshness and persistence guards remain active.
 
 | Stock | Fixed quantity per grid | Half-grid order quantity | Two-grid quantity |
@@ -47,6 +49,7 @@ All monetary values above are configurable; no stock runtime imposes a second mo
 | AMD | 0.898 | 0.449 | 1.796 |
 | NVDA | 2.290 | 1.145 | 4.580 |
 | INTC | 5.234 | 2.617 | 10.468 |
+| SPCX | 3.3632 | 1.6816 | 6.7264 |
 
 Quantities correspond approximately to 500 USDC per grid and 250 USDC per half-grid using the 2026-10-15 market snapshot. Fixed quantities do not track a fixed dollar order size as prices change; the original live nominal cap can therefore block a second grid. Exchange minima and common quantity steps are in `market_constraints`.
 

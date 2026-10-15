@@ -6,9 +6,9 @@ from core.services.arbitrage_monitor_v2.config.symbol_config import SegmentedCon
 from core.services.arbitrage_monitor_v2.config.monitor_config import ConfigManager
 from core.services.arbitrage_monitor_v2.config.multi_exchange_config import MultiExchangeArbitrageConfigManager
 
-SYMBOLS = {s + '-USDC-PERP' for s in ('MU', 'SNDK', 'AMD', 'NVDA', 'INTC')}
+SYMBOLS = {s + '-USDC-PERP' for s in ('MU', 'SNDK', 'AMD', 'NVDA', 'INTC', 'SPCX')}
 
-def test_native_loader_uses_only_five_stocks():
+def test_native_loader_uses_only_six_stocks():
     segmented = SegmentedConfigManager(Path('config/arbitrage/arbitrage_segmented.yaml'))
     monitor = ConfigManager(Path('config/arbitrage/monitor_lighter_arcus.yaml'))
     assert set(monitor.config.symbols) == SYMBOLS
@@ -112,3 +112,58 @@ def test_launcher_lock_and_sigterm_share_engine_pid(tmp_path):
     _, error = blocked.communicate(timeout=5)
     assert blocked.returncode != 0 and b'symlink' in error
     assert sentinel.read_text() == 'unchanged'
+
+def test_all_active_lists_and_shared_budget_are_six_stock_only():
+    def load(name):
+        return yaml.safe_load(Path('config/arbitrage/' + name + '.yaml').read_text())
+    profile = load('arbitrage_segmented')
+    assert set(profile['symbol_configs']) == SYMBOLS
+    assert set(profile['market_constraints']) == {s.split('-')[0] for s in SYMBOLS}
+    assert set(profile['risk_control']['open_only_close']['price_volatility']['trigger_symbols']) == {s.split('-')[0] for s in SYMBOLS}
+    assert set(load('monitor_lighter_arcus')['symbols']) == SYMBOLS
+    assert set(load('multi_exchange_arbitrage')['symbols']) == SYMBOLS
+    assert set(load('segment_symbol_filters')['enabled_symbols']) == SYMBOLS
+    assert set(load('arbitrage_lighter_arcus')['arbitrage_execution']['quantity_config']) == SYMBOLS | {'default'}
+    assert load('multi_leg_pairs')['pairs'] == []
+    assert load('extra_symbols') == {'extra_symbols': [], 'by_exchange': {}}
+    manager = MultiExchangeArbitrageConfigManager(Path('config/arbitrage/multi_exchange_arbitrage.yaml'))
+    assert set(manager.get_required_symbols()) == SYMBOLS
+    assert len(manager.get_pairs()) == 6
+    assert all(pair.allow_reverse and {pair.exchange_a, pair.exchange_b} == {'lighter', 'arcus'} for pair in manager.get_pairs())
+    guard = profile['risk_control']['open_only_close']
+    assert guard['max_exchange_position_value']['max_value_usdc'] == 5000
+    assert guard['dynamic_max_exchange_position_value']['equity_multiplier'] == 1.0
+
+
+def test_spcx_native_mapping_quantities_and_exchange_boundaries():
+    import pytest
+    from types import SimpleNamespace
+    from core.services.arbitrage_monitor.utils.symbol_converter import SimpleSymbolConverter
+    from core.services.arbitrage_monitor_v2.execution.arbitrage_executor import ArbitrageExecutor, ExecutionRequest
+    symbol = 'SPCX-USDC-PERP'
+    converter = SimpleSymbolConverter()
+    for exchange, native in [('lighter', 'SPCX'), ('arcus', 'SPCX-USD')]:
+        assert converter.convert_to_exchange(symbol, exchange) == native
+        assert converter.convert_from_exchange(native, exchange) == symbol
+    cfg = SegmentedConfigManager(Path('config/arbitrage/arbitrage_segmented.yaml')).get_config(symbol)
+    assert cfg.quantity_config.base_quantity == Decimal('3.3632')
+    assert Decimal(str(cfg.grid_config.split_order_size)) == Decimal('1.6816')
+    assert cfg.quantity_config.quantity_precision == 4
+    assert cfg.quantity_config.exchange_min_order_qty == {'default': Decimal('.035'), 'lighter': Decimal('.035'), 'arcus': Decimal('.01')}
+    profile = yaml.safe_load(Path('config/arbitrage/arbitrage_segmented.yaml').read_text())
+    executor = SimpleNamespace(market_constraints=profile['market_constraints'])
+    execution = yaml.safe_load(Path('config/arbitrage/arbitrage_lighter_arcus.yaml').read_text())
+    assert execution['arbitrage_execution']['quantity_config'][symbol] == {'single_order_quantity': 1.6816, 'max_position_quantity': 6.7264, 'quantity_precision': 4}
+    for buy, sell in [('lighter', 'arcus'), ('arcus', 'lighter')]:
+        for quantity in ['1.6816', '3.3632', '6.7264']:
+            request = ExecutionRequest(symbol, buy, sell, Decimal('148.66'), Decimal('148.66'), Decimal(quantity))
+            ArbitrageExecutor._validate_pair_quantity(executor, request)
+        for quantity in ['0.0349', '1.68161']:
+            request.quantity = Decimal(quantity)
+            with pytest.raises(ValueError): ArbitrageExecutor._validate_pair_quantity(executor, request)
+        request.quantity = Decimal('1.6816')
+        for venue, minimum in [('lighter', Decimal(10)), ('arcus', Decimal(5))]:
+            request.price_buy = request.price_sell = Decimal('148.66')
+            field = 'price_buy' if venue == buy else 'price_sell'
+            setattr(request, field, (minimum - Decimal('.01')) / request.quantity)
+            with pytest.raises(ValueError): ArbitrageExecutor._validate_pair_quantity(executor, request)

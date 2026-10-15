@@ -83,6 +83,7 @@ symbol_mappings:
       "SNDK-USDC-PERP": "SNDK-USD"
       "AMD-USDC-PERP": "AMD-USD"
       "INTC-USDC-PERP": "INTC-USD"
+      "SPCX-USDC-PERP": "SPCX-USD"
       "BTC-USDC-PERP": "BTC-USD"
       "ETH-USDC-PERP": "ETH-USD"
       "BNB-USDC-PERP": "BNB-USD"
@@ -125,6 +126,7 @@ symbol_mappings:
       "NVDA-USDC-PERP": "NVDA"
       "AMD-USDC-PERP": "AMD"
       "INTC-USDC-PERP": "INTC"
+      "SPCX-USDC-PERP": "SPCX"
       # Lighter 使用简化符号格式（只保留基础币种）
       "BTC-USDC-PERP": "BTC"
       "ETH-USDC-PERP": "ETH"
@@ -148,6 +150,7 @@ symbol_mappings:
       "SNDK-USD": "SNDK-USDC-PERP"
       "AMD-USD": "AMD-USDC-PERP"
       "INTC-USD": "INTC-USDC-PERP"
+      "SPCX-USD": "SPCX-USDC-PERP"
       "BTC-USD": "BTC-USDC-PERP"
       "ETH-USD": "ETH-USDC-PERP"
       "BNB-USD": "BNB-USDC-PERP"
@@ -163,6 +166,7 @@ symbol_mappings:
       "NVDA": "NVDA-USDC-PERP"
       "AMD": "AMD-USDC-PERP"
       "INTC": "INTC-USDC-PERP"
+      "SPCX": "SPCX-USDC-PERP"
       # Lighter API 返回的符号（无后缀）
       "BTC": "BTC-USDC-PERP"
       "ETH": "ETH-USDC-PERP"

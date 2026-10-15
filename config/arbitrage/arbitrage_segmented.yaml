@@ -51,6 +51,7 @@ risk_control:
       - AMD
       - NVDA
       - INTC
+      - SPCX
       enabled: true
       window_seconds: 300
       threshold_pct: 3
@@ -256,6 +257,29 @@ symbol_configs:
         arcus: 0.1
     risk_config:
       max_position_value: 1000.0
+  SPCX-USDC-PERP:
+    enabled: true
+    grid_config:
+      initial_spread_threshold: 0.15
+      grid_step: 0.09
+      max_segments: 2
+      profit_per_segment: 0.09
+      slippage_tolerance: 0.0001
+      require_orderbook_liquidity: true
+      min_orderbook_quantity: 1.6816
+      split_order_size: 1.6816
+    quantity_config:
+      base_quantity: 3.3632
+      split_order_size: 1.6816
+      quantity_mode: fixed
+      quantity_precision: 4
+      target_value_usdc: 500.0
+      min_exchange_order_qty:
+        default: 0.035
+        lighter: 0.035
+        arcus: 0.01
+    risk_config:
+      max_position_value: 1000.0
 market_constraints:
   MU:
     quantity_step: '0.0001'
@@ -284,6 +308,12 @@ market_constraints:
   INTC:
     quantity_step: '0.001'
     min_quantity: '0.1'
+    min_notional_by_exchange:
+      lighter: 10
+      arcus: 5
+  SPCX:
+    quantity_step: '0.0001'
+    min_quantity: '0.035'
     min_notional_by_exchange:
       lighter: 10
       arcus: 5
