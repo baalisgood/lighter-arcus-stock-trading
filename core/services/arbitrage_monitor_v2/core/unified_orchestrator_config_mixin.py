@@ -76,10 +76,7 @@ class UnifiedOrchestratorConfigMixin:
         复用同一套执行参数。
         """
         config_path = self.execution_config_path
-        strict = bool(self.config_manager.get_system_mode().get("stock_profile"))
         if not config_path.exists():
-            if strict:
-                raise ValueError("Required stock execution configuration missing")
             logger.warning(
                 "⚠️ [统一调度] 未找到统一执行配置文件 (%s)，"
                 "将使用默认执行配置（市价优先）",
@@ -89,7 +86,7 @@ class UnifiedOrchestratorConfigMixin:
 
         try:
             self._unified_execution_config_manager = UnifiedConfigManager(
-                config_path=config_path, strict=strict
+                config_path=config_path
             )
             unified_config = self._unified_execution_config_manager.get_unified_config()
             exec_config = unified_config.execution
@@ -105,8 +102,6 @@ class UnifiedOrchestratorConfigMixin:
             )
             return exec_config
         except Exception as exc:
-            if strict:
-                raise
             logger.warning(
                 "⚠️ [统一调度] 读取统一执行配置失败，改用默认执行配置: %s",
                 exc,

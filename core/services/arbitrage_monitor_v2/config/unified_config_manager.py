@@ -65,8 +65,7 @@ class UnifiedConfigManager:
         self,
         config_path: Optional[Path] = None,
         enable_hot_reload: bool = False,
-        hot_reload_interval: int = 5,
-        strict: bool = False,
+        hot_reload_interval: int = 5
     ):
         """
         初始化统一配置管理器
@@ -77,7 +76,6 @@ class UnifiedConfigManager:
             hot_reload_interval: 热更新检查间隔（秒，默认5秒）
         """
         self.config_path = config_path
-        self.strict = strict
         self.config = ArbitrageUnifiedConfig()
         self.enable_hot_reload = enable_hot_reload
         self.hot_reload_interval = hot_reload_interval
@@ -97,8 +95,6 @@ class UnifiedConfigManager:
             if self.enable_hot_reload:
                 self._last_modified_time = config_path.stat().st_mtime
         else:
-            if self.strict:
-                raise ValueError("Required stock execution configuration missing")
             self._load_defaults()
     
     def _load_from_file(self):
@@ -106,9 +102,6 @@ class UnifiedConfigManager:
         try:
             with open(self.config_path, 'r', encoding='utf-8') as f:
                 data = yaml.safe_load(f) or {}
-            if self.strict:
-                from stock_profile import validate_stock_profile
-                validate_stock_profile(self.config_path.resolve().parents[2])
             
             # 加载系统运行模式配置
             if 'system_mode' in data:
@@ -130,8 +123,6 @@ class UnifiedConfigManager:
             logger.info(f"📊 [配置管理] 系统模式: {'🔍 监控模式' if self.config.system_mode.monitor_only else '⚡ 实盘模式'}")
             
         except Exception as e:
-            if self.strict:
-                raise ValueError("Invalid required stock execution configuration") from e
             logger.warning(f"⚠️  [配置管理] 加载配置文件失败: {e}，使用默认配置", exc_info=True)
             self._load_defaults()
     

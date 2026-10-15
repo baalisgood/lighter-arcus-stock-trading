@@ -72,7 +72,6 @@ class LighterBase:
             config: 配置字典，包含API密钥、URL等信息
         """
         self.config = config
-        self.public_only = bool(config.get("public_only", False))
         self.testnet = config.get("testnet", False)
 
         # API 配置
@@ -114,11 +113,6 @@ class LighterBase:
             logger.warning(f"⚠️ ws_url为空，使用默认值: {default_ws}")
             self.ws_url = default_ws
 
-        official_api = self.TESTNET_URL if self.testnet else self.MAINNET_URL
-        official_ws = self.TESTNET_WS_URL if self.testnet else self.MAINNET_WS_URL
-        if not self.public_only and (self.base_url != official_api or self.ws_url != official_ws):
-            raise ValueError("Lighter endpoints must match the selected network")
-
         # 市场信息缓存
         self._markets_cache: Dict[int, Dict[str, Any]] = {}
         self._symbol_to_market_index: Dict[str, int] = {}
@@ -133,14 +127,6 @@ class LighterBase:
         # auth_enabled只控制WebSocket是否订阅账户数据，不影响REST API的余额查询能力
         self.signer_client = None
         
-        if self.public_only:
-            self.ws_url = (self.TESTNET_WS_URL if self.testnet else self.MAINNET_WS_URL) + '?readonly=true'
-            self.auth_enabled = False
-            self.api_key_private_key = ''
-            self.account_index = None
-            self.api_key_index = None
-            return
-
         # 🔥 优先从环境变量读取认证信息，其次使用配置文件
         import os
         api_key_private_key = os.getenv('LIGHTER_API_KEY_PRIVATE_KEY') or self.api_key_private_key
@@ -214,23 +200,19 @@ class LighterBase:
 
         try:
             # 新版签名
-            client = SignerClient(
+            return SignerClient(
                 url=base_url,
                 account_index=account_index,
                 api_private_keys=api_private_keys,
             )
         except TypeError:
             # 兼容旧版签名
-            client = SignerClient(
+            return SignerClient(
                 url=base_url,
                 private_key=api_key_private_key,
                 account_index=account_index,
                 api_key_index=api_key_index,
             )
-
-        from .lighter_transport import harden_client
-        harden_client(client.api_client, base_url)
-        return client
 
     def get_base_url(self) -> str:
         """获取REST API基础URL"""

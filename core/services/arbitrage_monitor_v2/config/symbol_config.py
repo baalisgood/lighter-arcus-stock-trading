@@ -467,9 +467,6 @@ class SegmentedConfigManager:
         if short and short in self.symbol_configs:
             return self.symbol_configs[short]
 
-        if self.system_mode.get("stock_profile"):
-            raise ValueError(f"Unsupported stock symbol: {symbol}")
-
         # 返回默认配置（创建新实例，避免修改原配置）
         if self.default_config:
             return SymbolConfig(

@@ -44,8 +44,7 @@ class ArbitrageOrchestrator:
     def __init__(
         self,
         config_path: Optional[Path] = None,
-        debug_config: Optional[DebugConfig] = None,
-        public_only: bool = False
+        debug_config: Optional[DebugConfig] = None
     ):
         """
         初始化总调度器
@@ -55,8 +54,7 @@ class ArbitrageOrchestrator:
             debug_config: Debug配置
         """
         # 加载配置
-        self.public_only = public_only
-        self.config_manager = ConfigManager(config_path, public_only=public_only)
+        self.config_manager = ConfigManager(config_path)
         self.config: MonitorConfig = self.config_manager.get_config()
         self.debug = debug_config or DebugConfig()
         
@@ -73,8 +71,7 @@ class ArbitrageOrchestrator:
         self.data_receiver = DataReceiver(
             self.orderbook_queue,
             self.ticker_queue,
-            self.debug,
-            public_only=public_only,
+            self.debug
         )
         
         self.data_processor = DataProcessor(
@@ -228,27 +225,14 @@ class ArbitrageOrchestrator:
         print("🔌 正在连接交易所...")
         
         # 创建工厂实例
-        factory = None if self.public_only else ExchangeFactory()
-        config_loader = None if self.public_only else ExchangeConfigLoader()
+        factory = ExchangeFactory()
+        config_loader = ExchangeConfigLoader()
         
         # 🚀 第1步：并行创建所有适配器（配置解析）
         adapters_to_connect = []
         
         for exchange in self.config.exchanges:
             try:
-                if self.public_only:
-                    from core.adapters.exchanges.interface import ExchangeConfig
-                    from core.adapters.exchanges.models import ExchangeType
-                    exchange_config = ExchangeConfig(
-                        exchange_id=exchange, name=exchange, exchange_type=ExchangeType.PERPETUAL,
-                        api_key='', api_secret='', enable_heartbeat=False,
-                        extra_params={'public_only': True},
-                    )
-                    from core.adapters.exchanges.adapters.lighter import LighterAdapter
-                    from core.adapters.exchanges.adapters.arcus import ArcusAdapter
-                    adapter = {'lighter': LighterAdapter, 'arcus': ArcusAdapter}[exchange](exchange_config)
-                    adapters_to_connect.append((exchange, adapter))
-                    continue
                 # 尝试加载交易所特定配置文件
                 config_path = Path(f"config/exchanges/{exchange}_config.yaml")
                 exchange_config = None
@@ -338,17 +322,7 @@ class ArbitrageOrchestrator:
         async def connect_adapter(exchange: str, adapter):
             """连接单个适配器"""
             try:
-                connected = await adapter.connect()
-                if self.public_only and connected is not True:
-                    raise ConnectionError(f'{exchange} 公共行情连接失败')
-                if self.public_only:
-                    supported = set(await adapter.get_supported_symbols())
-                    requested = {
-                        self.data_receiver.symbol_converter.convert_to_exchange(symbol, exchange)
-                        if exchange == 'lighter' else symbol for symbol in self.config.symbols
-                    }
-                    if not requested <= supported:
-                        raise ValueError(f'{exchange} 缺少启用的股票市场: {sorted(requested - supported)}')
+                await adapter.connect()
                 self.data_receiver.register_adapter(exchange, adapter)
                 print(f"✅ [{exchange}] 连接成功")
                 return (exchange, adapter, None)
@@ -371,8 +345,6 @@ class ArbitrageOrchestrator:
                 failed_exchanges.append(f"{result[0]}: {result[2]}")
         
         if failed_exchanges:
-            if self.public_only:
-                await asyncio.gather(*(adapter.disconnect() for _, adapter in adapters_to_connect), return_exceptions=True)
             raise Exception(f"部分交易所连接失败: {', '.join(failed_exchanges)}")
     
     async def _subscribe_data(self):

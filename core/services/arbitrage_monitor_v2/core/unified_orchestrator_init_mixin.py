@@ -385,7 +385,7 @@ class UnifiedOrchestratorInitMixin:
         self.config_manager = SegmentedConfigManager(segmented_config_path)
         # 🔔 声音报警（用于余额风控等关键事件；可在 system_mode 中覆盖参数）
         self._sound_alarm = SoundAlarm.from_system_mode(self.config_manager.get_system_mode())
-        self.monitor_config_manager = MonitorConfigManager(monitor_config_path, public_only=bool(self.config_manager.get_system_mode().get("stock_profile")))
+        self.monitor_config_manager = MonitorConfigManager(monitor_config_path)
         self.monitor_config = self.monitor_config_manager.get_config()
         self.debug = debug_config or DebugConfig.create_production()
         self.symbol_spreads: Dict[str, List[SpreadData]] = {}
@@ -424,7 +424,7 @@ class UnifiedOrchestratorInitMixin:
         except Exception:
             mx_path = None
         self.multi_exchange_config_manager = MultiExchangeArbitrageConfigManager(
-            config_path=mx_path, strict=bool(self.config_manager.get_system_mode().get("stock_profile"))
+            config_path=mx_path
         )
         self.multi_exchange_pairs: List[TradingPair] = self.multi_exchange_config_manager.get_pairs(
         )

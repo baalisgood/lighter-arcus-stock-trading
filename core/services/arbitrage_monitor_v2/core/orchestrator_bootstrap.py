@@ -46,10 +46,6 @@ class OrchestratorBootstrap:
         """初始化交易所适配器（参考原逻辑）。"""
         orc = self.orchestrator
         monitor_config = orc.monitor_config
-        if orc.config_manager.get_system_mode().get("stock_profile"):
-            from stock_runtime import create_stock_adapters
-            orc.exchange_adapters.update(create_stock_adapters())
-            return
         logger.info(
             f"🔧 [统一调度] 开始初始化交易所适配器: {monitor_config.exchanges}"
         )
@@ -292,19 +288,13 @@ class OrchestratorBootstrap:
                 print(f"❌ 连接失败: {exchange_name} | {exc}")
                 return (exchange_name, None, exc)
 
-        results = await asyncio.gather(
+        await asyncio.gather(
             *[
                 connect_adapter(name, adapter)
                 for name, adapter in orc.exchange_adapters.items()
             ],
             return_exceptions=True,
         )
-
-        if orc.config_manager.get_system_mode().get("stock_profile"):
-            if any(isinstance(row, BaseException) or row[2] is not None for row in results):
-                raise RuntimeError("Stock exchange connection failed")
-            from stock_runtime import load_stock_constraints
-            await load_stock_constraints(orc)
 
         # 订阅阶段也可能因网络/WS 卡住；加总超时保护，避免启动阶段“看起来挂死”。
         timeout_s = float(getattr(orc.monitor_config, "data_timeout_seconds", 30) or 30)

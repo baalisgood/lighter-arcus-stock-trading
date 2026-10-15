@@ -4,7 +4,6 @@ import inspect
 import json
 
 import websockets
-from .secure_websocket import connect
 
 from ..order_state import OrderStateUnknownError
 from ..models import OrderStatus
@@ -27,8 +26,7 @@ class ArcusWebSocket:
         if self._task:
             return
         self._stopping = False
-        self._socket = await connect(self.adapter.ws_url, ping_interval=20, ping_timeout=20, open_timeout=self.adapter.config.connect_timeout,
-                                                **({'proxy': None} if self.adapter.config.extra_params.get('public_only') else {}))
+        self._socket = await websockets.connect(self.adapter.ws_url, ping_interval=20, ping_timeout=20, open_timeout=self.adapter.config.connect_timeout)
         self._ws_connected = True
         for frame in self._subscriptions.values():
             await self._socket.send(json.dumps(frame))
@@ -62,8 +60,7 @@ class ArcusWebSocket:
                 return
             await asyncio.sleep(self.adapter.config.retry_delay)
             try:
-                self._socket = await connect(self.adapter.ws_url, ping_interval=20, ping_timeout=20,
-                                                        **({'proxy': None} if self.adapter.config.extra_params.get('public_only') else {}))
+                self._socket = await websockets.connect(self.adapter.ws_url, ping_interval=20, ping_timeout=20)
                 self._ws_connected = True
                 for frame in self._subscriptions.values():
                     await self._socket.send(json.dumps(frame))

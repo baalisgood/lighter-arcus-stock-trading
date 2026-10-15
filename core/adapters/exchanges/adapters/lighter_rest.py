@@ -127,7 +127,7 @@ class LighterRest(LighterBase):
         self.markets = {}
 
         # 🔥 滑点配置（默认万分之2 = 0.02%）
-        self.base_slippage = Decimal('0.0001') if config.get('stock_profile') else Decimal(str(config.get('slippage', '0.0002')))
+        self.base_slippage = Decimal(str(config.get('slippage', '0.0002')))
 
         # 🔥 市场信息缓存（避免频繁调用API触发429限流）
         # 这是关键修复！没有这个缓存会导致批量下单时触发429
@@ -268,25 +268,14 @@ class LighterRest(LighterBase):
         try:
             # 父类构造及上次未完成初始化留下的客户端必须先释放。
             await self.close()
-            if self.public_only:
-                configuration = Configuration(host=self.base_url)
-                configuration.verify_ssl = True
-                self.api_client = ApiClient(configuration=configuration)
-                self.order_api = OrderApi(self.api_client)  # Public order-book metadata API.
-                await self._load_markets()
-                if not self.markets:
-                    raise ValueError('公共市场元数据为空')
-                self._connected = True
-                return
             # 🔥 SSL 配置：从环境变量读取
-            verify_ssl = True
+            verify_ssl = os.getenv('LIGHTER_VERIFY_SSL',
+                                   'true').lower() == 'true'
 
             # 创建API客户端配置
             configuration = Configuration(host=self.base_url)
             configuration.verify_ssl = verify_ssl  # 设置 SSL 验证
             self.api_client = ApiClient(configuration=configuration)
-            from .lighter_transport import harden_client
-            harden_client(self.api_client, self.base_url)
 
             # 创建各种API实例
             self.account_api = AccountApi(self.api_client)
@@ -497,8 +486,6 @@ class LighterRest(LighterBase):
 
         except Exception as e:
             logger.error(f"加载市场信息失败: {e}")
-            if self.public_only:
-                raise
 
     async def get_exchange_info(self) -> ExchangeInfo:
         """
@@ -533,7 +520,7 @@ class LighterRest(LighterBase):
                             "market_index": ob.market_id,  # 🔥 添加market_index别名，与缓存键一致
                             "base_asset": ob.symbol.split('-')[0] if '-' in ob.symbol else "",
                             "quote_asset": ob.symbol.split('-')[1] if '-' in ob.symbol else "USD",
-                            "status": getattr(ob, 'status', None if self.public_only else 'trading'),
+                            "status": getattr(ob, 'status', 'trading'),
                             "price_decimals": price_decimals,  # 可能为 None，使用时需处理
                             "price_multiplier": price_multiplier,  # 可能为 None，使用时需处理
                         })
@@ -1535,12 +1522,6 @@ class LighterRest(LighterBase):
             logger.debug(f"🔍 获取市场详情: market_id={market_index}")
             market_details = await self.order_api.order_book_details(market_id=market_index)
             price_decimals = self._extract_price_decimals(market_details)
-            stock_meta = None
-            if self.config.get("stock_profile"):
-                stock_meta = getattr(self, "_stock_market_metadata", {}).get(symbol.split("-")[0])
-                if not stock_meta:
-                    raise ValueError("Authoritative stock market metadata unavailable")
-                price_decimals = stock_meta["price_decimals"]
 
             # 如果详情未提供或解析失败，尝试从已加载的 markets 字典兜底（含 price_decimals）
             if price_decimals is None and self.markets:
@@ -1568,8 +1549,7 @@ class LighterRest(LighterBase):
             market_info = {
                 'market_index': market_index,
                 'price_decimals': price_decimals,
-                'price_multiplier': price_multiplier,
-                **({'size_decimals': stock_meta['size_decimals']} if stock_meta else {})
+                'price_multiplier': price_multiplier
             }
 
             # 🔥 缓存市场信息（关键！）
@@ -1608,7 +1588,7 @@ class LighterRest(LighterBase):
             滑点保护价格，或 None
         """
         # 🔥 计算基础滑点比例
-        base_slippage = self.base_slippage if self.config.get("stock_profile") else self.base_slippage * slippage_multiplier
+        base_slippage = self.base_slippage * slippage_multiplier
         is_sell = (side.lower() == "sell")
 
         # 🔥 如果提供了目标价格，在目标价格上应用滑点
@@ -1691,14 +1671,9 @@ class LighterRest(LighterBase):
         avg_execution_price_rounded = avg_execution_price.quantize(
             quantize_precision)
 
-        if self.config.get("stock_profile") and not kwargs.get("reduce_only", kwargs.get("reduceOnly", False)) and quantity * avg_execution_price_rounded > Decimal(500):
-            raise ValueError("Stock protected order nominal exceeds 500 USDC")
-
-        quantity_multiplier_exponent = market_info["size_decimals"] if self.config.get("stock_profile") else max(0, 6 - price_decimals)
+        quantity_multiplier_exponent = max(0, 6 - price_decimals)
         quantity_multiplier = Decimal(10) ** quantity_multiplier_exponent
         base_amount = quantity * quantity_multiplier
-        if self.config.get("stock_profile") and (base_amount < 1 or base_amount != base_amount.to_integral_value()):
-            raise ValueError("Stock quantity does not match authoritative size precision")
         if base_amount < 1:
             base_amount = Decimal("1")
         try:
@@ -1774,11 +1749,9 @@ class LighterRest(LighterBase):
 
         price_rounded = price.quantize(quantize_precision)
 
-        quantity_multiplier_exponent = market_info["size_decimals"] if self.config.get("stock_profile") else max(0, 6 - price_decimals)
+        quantity_multiplier_exponent = max(0, 6 - price_decimals)
         quantity_multiplier = Decimal(10) ** quantity_multiplier_exponent
         base_amount = quantity * quantity_multiplier
-        if self.config.get("stock_profile") and (base_amount < 1 or base_amount != base_amount.to_integral_value()):
-            raise ValueError("Stock quantity does not match authoritative size precision")
         if base_amount < 1:
             base_amount = Decimal("1")
         try:

@@ -1,40 +1,55 @@
-#!/bin/sh
-set -eu
+#!/usr/bin/env bash
+set -euo pipefail
 umask 077
-[ "$#" -eq 1 ] || { echo 'Usage: ./start.sh monitor|check|live' >&2; exit 2; }
-case "$1" in monitor|check|live) ;; *) echo 'Unknown mode' >&2; exit 2;; esac
-STOCK_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
-cd "$STOCK_ROOT"
-STOCK_PYTHON=${STOCK_PYTHON:-$(command -v python3)}
-case "$STOCK_PYTHON" in /*) ;; *) echo 'STOCK_PYTHON must be absolute' >&2; exit 2;; esac
-exec /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME="$HOME" TERM="${TERM:-dumb}" LANG="${LANG:-en_US.UTF-8}" PYTHONDONTWRITEBYTECODE=1 STOCK_LAUNCHER_ROOT="$STOCK_ROOT" "$STOCK_PYTHON" - "$STOCK_ROOT" "$1" <<'PY'
-import fcntl
-import os
-from pathlib import Path
-import runpy
-import sys
-root = Path(sys.argv[1]).resolve()
-mode = sys.argv[2]
-os.chdir(root)
-for name in ('run', 'logs', 'data', 'config', 'core'):
+project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+task_python="${STOCK_PYTHON:-${ARBITRAGE_PYTHON:-$project_dir/.venv/bin/python}}"
+case "$task_python" in /*) ;; *) echo 'Python path must be absolute' >&2; exit 2 ;; esac
+case "${1:-}" in check|monitor|live) ;; *) echo 'Usage: bash start.sh check|monitor|live' >&2; exit 2 ;; esac
+[[ $# == 1 ]] || exit 2
+cd "$project_dir"
+exec env -i PATH=/usr/bin:/bin LANG="${LANG:-en_US.UTF-8}" "$task_python" - "$1" <<'PY'
+import fcntl, os, pathlib, sys, tempfile
+import yaml
+root = pathlib.Path.cwd()
+mode = sys.argv[1]
+# The wrapper only isolates paths/environment and selects native monitor_only.
+for name in ('.env', 'config', 'config/exchanges', 'config/exchanges/lighter_config.yaml',
+             'config/exchanges/arcus_config.yaml', 'run', 'run/stock.lock', 'logs', 'data', 'core'):
     path = root / name
     if path.is_symlink() or not path.resolve().is_relative_to(root):
-        raise SystemExit(f'Stock {name} directory escapes project')
-    if name in ('run', 'logs', 'data'):
-        path.mkdir(exist_ok=True)
-# Reject nested symlinks before imports or creation of runtime log/data files.
-for name in ('config', 'core', 'run', 'logs', 'data'):
-    if any(p.is_symlink() for p in (root / name).rglob('*')):
-        raise SystemExit('Stock profile refuses symlinked config/code/runtime files')
-lock_fd = os.open(root / 'run/stock.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
-try:
-    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-except BlockingIOError:
-    raise SystemExit('A stock process is already running')
-sys.path.insert(0, str(root))
-if mode == 'monitor':
-    sys.argv = [str(root / 'run_arbitrage_monitor_v2.py'), '--public-only', '--config', str(root / 'config/arbitrage/stock_monitor.yaml')]
-else:
-    sys.argv = [str(root / 'run_stock.py'), mode]
-runpy.run_path(sys.argv[0], run_name='__main__')
+        raise SystemExit('Refusing symlink/escaped local path: ' + name)
+profiles = ['arbitrage_segmented', 'monitor_lighter_arcus', 'arbitrage_lighter_arcus',
+            'multi_exchange_arbitrage', 'multi_leg_pairs']
+loaded = {}
+for name in profiles:
+    path = root / 'config/arbitrage' / (name + '.yaml')
+    if path.is_symlink() or not path.resolve().is_relative_to(root):
+        raise SystemExit('Refusing escaped profile')
+    value = yaml.safe_load(path.read_text())
+    if not isinstance(value, dict):
+        raise SystemExit('Invalid profile: ' + name)
+    loaded[name] = value
+if mode == 'check':
+    print('Local YAML syntax OK; no account or network checks performed.')
+    raise SystemExit(0)
+for exchange in ('lighter', 'arcus'):
+    if not (root / 'config/exchanges' / (exchange + '_config.yaml')).is_file():
+        raise SystemExit('Missing local authentication config; copy examples/' + exchange + '_config.yaml.example')
+(root / 'run').mkdir(exist_ok=True)
+with (root / 'run/stock.lock').open('a') as lock:
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        raise SystemExit('Stock process already running')
+    config = loaded['arbitrage_segmented']
+    config['system_mode']['monitor_only'] = mode != 'live'
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', dir=root / 'run', delete=False) as output:
+        yaml.safe_dump(config, output, allow_unicode=True, sort_keys=False)
+        runtime = output.name
+    print('Native engine mode:', mode, '(requires account authentication)', flush=True)
+    # Keep the lock with the actual trading PID, including termination signals.
+    os.set_inheritable(lock.fileno(), True)
+    os.execv(sys.executable, [sys.executable, 'main_unified.py', '--config', runtime,
+                            '--monitor-config', 'config/arbitrage/monitor_lighter_arcus.yaml',
+                            '--execution-config', 'config/arbitrage/arbitrage_lighter_arcus.yaml'])
 PY

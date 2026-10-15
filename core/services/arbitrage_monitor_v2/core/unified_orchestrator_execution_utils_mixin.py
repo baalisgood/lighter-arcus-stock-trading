@@ -254,15 +254,7 @@ class UnifiedOrchestratorExecutionUtilsMixin:
                     gross += value
                     if key[1] == normalize(leg_symbol):
                         symbol_gross += value
-                if getattr(self, "stock_profile", False):
-                    price = self.stock_protected_price(request.symbol, max(buy, sell))
                 added = quantity * positive(price)
-                if getattr(self, "stock_profile", False):
-                    free = sum((positive(row.free) for row in snapshots[exchange][0]
-                                if str(getattr(row, "currency", "")).upper() in ("USDC", "USD")), Decimal("0"))
-                    if equity < gross + added or free < added:
-                        return False, "股票可用抵押余额不足"
-                    self.stock_validate_open(request, exchange, gross, symbol_gross, added)
                 if symbol_gross + added > cap:
                     return False, f"{exchange} 本币开仓后名义价值超过 {cap} USDC"
                 limits = []

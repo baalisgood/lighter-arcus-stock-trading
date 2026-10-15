@@ -102,21 +102,18 @@ class MonitorConfig:
 class ConfigManager:
     """配置管理器"""
     
-    def __init__(self, config_path: Optional[Path] = None, public_only: bool = False):
+    def __init__(self, config_path: Optional[Path] = None):
         """
         初始化配置管理器
         
         Args:
             config_path: 配置文件路径，如果为None则使用默认配置
         """
-        self.public_only = public_only
-        if public_only and (not config_path or not config_path.is_file()):
-            raise ValueError("公共行情模式需要显式配置文件")
         self.config_path = config_path
         self.config = MonitorConfig()
         self.display_symbols: List[str] = []
         self.subscription_symbols: List[str] = []
-        self.multi_leg_pairs_manager = None if public_only else MultiLegPairsConfigManager()
+        self.multi_leg_pairs_manager = MultiLegPairsConfigManager()
         
         if config_path and config_path.exists():
             self._load_from_file()
@@ -139,8 +136,7 @@ class ConfigManager:
         self.subscription_symbols = list(self.display_symbols)
         
         # 无论使用哪种来源，都尝试附加额外的symbol
-        if not public_only:
-            self._apply_extra_symbols()
+        self._apply_extra_symbols()
 
     def _load_from_file(self):
         """从YAML文件加载配置"""
@@ -148,36 +144,6 @@ class ConfigManager:
             with open(self.config_path, 'r', encoding='utf-8') as f:
                 data = yaml.safe_load(f)
             
-            if self.public_only:
-                # Strict public schema rejects account/strategy settings at every level.
-                schema = {
-                    'exchanges': None, 'symbols': None,
-                    'thresholds': {'min_spread_pct': None, 'min_funding_rate_diff': None},
-                    'performance': {'analysis_interval_ms': None, 'ui_refresh_interval_ms': None},
-                    'health_check': {'interval': None, 'data_timeout': None},
-                    'spread_history': {
-                        'enabled': None, 'data_dir': None,
-                        'sampling': {'interval_seconds': None, 'strategy': None},
-                    },
-                }
-                def validate_keys(value, allowed):
-                    if not isinstance(value, dict) or set(value) - set(allowed):
-                        raise ValueError('公共行情配置包含不支持的字段或结构')
-                    for key, child in allowed.items():
-                        if child is not None and key in value:
-                            validate_keys(value[key], child)
-                validate_keys(data, schema)
-                expected = {f'{name}-USDC-PERP' for name in ('MU', 'SNDK', 'NVDA', 'AMD', 'INTC')}
-                if data.get('exchanges') != ['lighter', 'arcus'] or not isinstance(data.get('symbols'), list):
-                    raise ValueError('公共行情仅支持 lighter/arcus 和股票白名单')
-                if not data['symbols'] or len(set(data['symbols'])) != len(data['symbols']) or not set(data['symbols']) <= expected:
-                    raise ValueError('公共行情配置包含未知或重复标的')
-                root = Path(__file__).resolve().parents[4]
-                history_dir = Path(data.get('spread_history', {}).get('data_dir', 'data/stock_spread_history'))
-                if not history_dir.resolve().is_relative_to(root):
-                    raise ValueError('股票历史目录必须位于独立项目内')
-                self.config.spread_history_data_dir = str(history_dir.resolve())
-
             # 映射YAML配置到MonitorConfig
             if 'multi_exchange_config_path' in data:
                 try:
@@ -333,25 +299,9 @@ class ConfigManager:
                     )
                 )
             
-            if self.public_only:
-                import math
-                nonnegative = (self.config.min_spread_pct, self.config.min_funding_rate_diff)
-                positive = (self.config.analysis_interval_ms, self.config.ui_refresh_interval_ms,
-                            self.config.health_check_interval, self.config.data_timeout_seconds,
-                            self.config.spread_history_sample_interval_seconds)
-                for value in nonnegative + positive:
-                    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
-                        raise ValueError('公共行情数值配置必须有限')
-                if any(value < 0 for value in nonnegative) or any(value <= 0 for value in positive):
-                    raise ValueError('公共行情阈值或间隔无效')
-                if not isinstance(self.config.spread_history_enabled, bool) or self.config.spread_history_sample_strategy not in ('max', 'mean', 'latest'):
-                    raise ValueError('公共行情历史配置无效')
-
             print(f"✅ 配置已从文件加载: {self.config_path}")
             
         except Exception as e:
-            if self.public_only:
-                raise ValueError("公共行情配置无效，拒绝回退") from e
             print(f"⚠️  加载配置文件失败: {e}，使用默认配置")
             self._load_defaults()
     
@@ -445,9 +395,6 @@ class ConfigManager:
             else:
                 print("💡 [配置管理] symbols 为空，将依赖 extra_symbols 和 multi_leg_pairs")
         
-        if self.public_only:
-            return self.config.exchanges == ["lighter", "arcus"] and bool(self.config.symbols)
-
         # 允许通过环境变量或配置控制单所模式
         allow_single_exchange = bool(os.environ.get("SEGMENTED_ALLOW_SINGLE_EXCHANGE", "").strip())
         if not allow_single_exchange:

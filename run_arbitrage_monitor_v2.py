@@ -10,9 +10,21 @@
     --symbols       指定监控的交易对（用逗号分隔）
 """
 
+# 🔥 加载环境变量（必须在其他导入之前）
+from dotenv import load_dotenv
 from pathlib import Path
+env_path = Path(__file__).parent / '.env'
+if env_path.exists():
+    load_dotenv(env_path)
+
 import asyncio
 import argparse
+
+from core.services.arbitrage_monitor_v2 import (
+    ArbitrageOrchestrator,
+    DebugConfig,
+    DebugLevel
+)
 
 
 def parse_args():
@@ -50,8 +62,6 @@ def parse_args():
         help='禁用UI（仅后台运行）'
     )
     
-    parser.add_argument('--public-only', action='store_true',
-                        help='严格公共行情模式（仅股票白名单，无账户/交易配置）')
     return parser.parse_args()
 
 
@@ -60,18 +70,6 @@ async def main():
     # 解析参数
     args = parse_args()
     
-    if args.public_only:
-        if args.symbols or args.no_ui:
-            raise ValueError('公共模式交易对和显示方式由显式配置固定')
-        # All module-level loggers use paths relative to this independent project.
-        import os
-        os.chdir(Path(__file__).resolve().parent)
-    else:
-        from dotenv import load_dotenv
-        load_dotenv(Path(__file__).parent / '.env')
-
-    from core.services.arbitrage_monitor_v2 import ArbitrageOrchestrator, DebugConfig
-
     # 创建Debug配置
     if args.debug_detail:
         debug_symbols = set(args.symbols.split(',')) if args.symbols else set()
@@ -86,13 +84,11 @@ async def main():
     # 创建调度器
     config_path = Path(args.config)
     if not config_path.exists():
-        if args.public_only:
-            raise ValueError(f'公共模式必须提供有效配置: {config_path}')
         print(f"⚠️  配置文件不存在: {config_path}")
         print("使用默认配置")
         config_path = None
     
-    orchestrator = ArbitrageOrchestrator(config_path, debug_config, public_only=args.public_only)
+    orchestrator = ArbitrageOrchestrator(config_path, debug_config)
     
     try:
         # 启动系统
@@ -114,8 +110,6 @@ async def main():
         print(f"\n❌ 系统错误: {e}")
         import traceback
         traceback.print_exc()
-        if args.public_only:
-            raise
     finally:
         # 停止系统
         await orchestrator.stop()

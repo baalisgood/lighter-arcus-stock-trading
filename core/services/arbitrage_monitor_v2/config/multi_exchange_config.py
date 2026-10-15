@@ -56,18 +56,14 @@ class TradingPair:
 class MultiExchangeArbitrageConfigManager:
     """多交易所套利配置管理器"""
 
-    def __init__(self, config_path: Optional[Path] = None, strict: bool = False):
+    def __init__(self, config_path: Optional[Path] = None):
         default_path = Path("config/arbitrage/multi_exchange_arbitrage.yaml")
         self.config_path = Path(config_path) if config_path else default_path
-        self.strict = strict
         self._pairs: List[TradingPair] = []
         self._raw: dict = {}
         self._load()
 
     def _load(self) -> None:
-        if self.strict:
-            from stock_profile import validate_stock_profile
-            validate_stock_profile(self.config_path.resolve().parents[2])
         if not self.config_path.exists():
             logger.info("🔍 未找到多交易所套利配置: %s", self.config_path)
             return
@@ -80,8 +76,6 @@ class MultiExchangeArbitrageConfigManager:
             with self.config_path.open("r", encoding="utf-8") as f:
                 raw = yaml.safe_load(f) or {}
         except Exception as exc:  # pragma: no cover
-            if self.strict:
-                raise
             logger.warning("⚠️ 加载多交易所套利配置失败 %s: %s", self.config_path, exc)
             return
 

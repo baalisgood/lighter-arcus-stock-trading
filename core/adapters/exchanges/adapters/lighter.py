@@ -98,7 +98,7 @@ class LighterAdapter(ExchangeAdapter):
 
         # 初始化订阅管理器
         try:
-            config_dict = self._config_dict if self._base.public_only else self._load_lighter_config()
+            config_dict = self._load_lighter_config()
 
             symbol_cache_service = self._get_symbol_cache_service()
 
@@ -115,8 +115,6 @@ class LighterAdapter(ExchangeAdapter):
         except Exception as e:
             if self.logger:
                 self.logger.warning(f"创建Lighter订阅管理器失败，使用默认配置: {e}")
-            if self._base.public_only:
-                raise
             # 使用默认配置
             default_config = {
                 'exchange_id': 'lighter',
@@ -155,23 +153,6 @@ class LighterAdapter(ExchangeAdapter):
         Returns:
             配置字典
         """
-        if (config.extra_params or {}).get('public_only'):
-            if any((config.api_key, config.api_secret, config.api_passphrase,
-                    config.private_key, config.wallet_address)) or set(config.extra_params) != {'public_only'}:
-                raise ValueError('公共行情模式拒绝认证或额外配置')
-            return {'public_only': True, 'auth_enabled': False,
-                    'account_index': None, 'api_key_index': None, 'api_key_private_key': '',
-                    'subscription_mode': {'mode': 'predefined', 'predefined': {
-                        'symbols': [], 'data_types': {'ticker': True, 'orderbook': True,
-                                                     'trades': False, 'user_data': False}}}}
-        if (config.extra_params or {}).get("stock_profile"):
-            return {"stock_profile": True, "strict_order_state": True, "slippage": "0.0001",
-                    "testnet": config.testnet, "auth_enabled": True,
-                    "api_key_private_key": config.api_key_private_key,
-                    "account_index": config.account_index, "api_key_index": config.api_key_index,
-                    "subscription_mode": {"mode": "predefined", "predefined": {
-                        "symbols": [], "data_types": {"ticker": True, "orderbook": True,
-                                                      "trades": False, "user_data": True}}}}
         # 🔥 优先从配置文件加载完整配置（包括api_config结构）
         try:
             lighter_config = self._load_lighter_config()
@@ -350,8 +331,6 @@ class LighterAdapter(ExchangeAdapter):
             try:
                 await self._rest.initialize()
             except Exception as rest_err:
-                if self._base.public_only:
-                    raise
                 # 🔥 如果REST初始化失败，记录警告但继续（公共数据模式可能不需要REST）
                 self.logger.warning(f"⚠️ Lighter REST客户端初始化失败: {rest_err}，继续尝试WebSocket连接...")
                 # 如果是因为账户订阅禁用导致的失败，这是正常的，继续执行
@@ -375,9 +354,6 @@ class LighterAdapter(ExchangeAdapter):
 
         except Exception as e:
             self.logger.error(f"连接Lighter失败: {e}")
-            if self._base.public_only:
-                await self.disconnect()
-                raise
             return False
 
     async def disconnect(self):
@@ -474,8 +450,6 @@ class LighterAdapter(ExchangeAdapter):
                 self.logger.info(f"加载了 {len(self._supported_symbols)} 个交易对")
         except Exception as e:
             self.logger.error(f"加载市场信息失败: {e}", exc_info=True)
-            if self._base.public_only:
-                raise
 
     def is_connected(self) -> bool:
         """
@@ -1407,9 +1381,6 @@ class LighterAdapter(ExchangeAdapter):
         Returns:
             交易对符号列表
         """
-        if self._base.public_only:
-            return [symbol for symbol in self._supported_symbols
-                    if self._market_info[symbol].get('status') == 'active']
         return self._supported_symbols.copy()
 
     def __repr__(self) -> str:

@@ -117,7 +117,7 @@ class UnifiedDecisionEngine:
         """
         if self.deduct_fees:
             fees = sum(_round_trip_fee_breakdown(spread_data, self.exchange_order_modes, self.exchange_fee_config))
-            spread_data = replace(spread_data, spread_pct=spread_data.spread_pct - fees - (0.04 if getattr(self, "stock_profile", None) else 0))
+            spread_data = replace(spread_data, spread_pct=spread_data.spread_pct - fees)
 
         # 🔥 检查交易所是否处于错误避让状态（日志节流在 backoff_controller 中处理）
         if self._backoff_controller:
@@ -509,9 +509,6 @@ class UnifiedDecisionEngine:
         # 限制在最大格子内
         effective_grid = min(grid, config.grid_config.max_segments)
 
-        if getattr(self, "stock_profile", None):
-            return Decimal(effective_grid) * (config.quantity_config.base_quantity or self.stock_profile.stock_order_quantity(symbol))
-
         if config.quantity_config.quantity_mode == "fixed":
             # 固定数量模式
             return Decimal(str(effective_grid)) * config.quantity_config.base_quantity
@@ -543,8 +540,7 @@ class UnifiedDecisionEngine:
         symbol: str,
         delta: Decimal,
         config: SymbolConfig,
-        carry: Decimal = Decimal('0'),
-        is_close: bool = False,
+        carry: Decimal = Decimal('0')
     ) -> Decimal:
         """
         计算本次订单数量（拆单）
@@ -569,9 +565,6 @@ class UnifiedDecisionEngine:
         - base_quantity=0.006, split_order_size=0.003
         - 第1笔: 0.003, 第2笔: 0.003
         """
-        if is_close and getattr(self, "stock_profile", None):
-            return self.stock_profile.stock_close_quantity(symbol, abs(delta))
-
         abs_delta = abs(delta)
         raw_needed = abs_delta + carry
 
@@ -605,11 +598,6 @@ class UnifiedDecisionEngine:
         """根据拆单配置计算基础下单量"""
         if available <= self.quantity_epsilon:
             return Decimal('0')
-
-        if getattr(self, "stock_profile", None):
-            from decimal import ROUND_DOWN
-            step = self.stock_profile.executor.market_constraints[config.symbol.split("-")[0]]["quantity_step"]
-            return (min(available, self.stock_profile.stock_order_quantity(config.symbol)) / step).to_integral_value(rounding=ROUND_DOWN) * step
 
         split_size = config.grid_config.split_order_size
         if split_size is not None and split_size > 0:
@@ -690,7 +678,7 @@ class UnifiedDecisionEngine:
 
         # 盈利达标，触发平仓
         close_amount = abs(delta)
-        close_qty = self._calculate_order_quantity(symbol, delta, config, is_close=True)
+        close_qty = self._calculate_order_quantity(symbol, delta, config)
 
         # 🔥 标记退出剥头皮（在记录平仓时会实际退出）
         # 🔥 添加网格级别信息，与网格平仓保持一致
@@ -913,8 +901,7 @@ class UnifiedDecisionEngine:
         close_qty = self._calculate_order_quantity(
             symbol,
             close_delta,
-            config,
-            is_close=True,
+            config
         )
 
         # 🔥 平仓日志口径：显示“当前持仓段位Tn”（避免价差为负时打印成T0造成误解）
@@ -1259,8 +1246,6 @@ class UnifiedDecisionEngine:
 
         position = self.positions.get(symbol)
         prev_total = position.total_quantity if position else Decimal("0")
-        if getattr(self, "stock_profile", None) and prev_total <= self.quantity_epsilon:
-            self.config_manager.get_config(symbol).quantity_config.base_quantity = actual_quantity
         pair_key = self._build_position_key(
             symbol,
             spread_data.exchange_buy,
@@ -1361,10 +1346,6 @@ class UnifiedDecisionEngine:
         actual_quantity: Decimal
     ) -> None:
         """记录未能成交的短缺数量，供下次开仓补齐"""
-        if getattr(self, "stock_profile", None):
-            # Stock targets already use confirmed exposure and the frozen first-fill base.
-            self.pending_open_shortfall[symbol] = Decimal("0")
-            return
         diff = requested_quantity - actual_quantity
         if diff > self.quantity_epsilon:
             self.pending_open_shortfall[symbol] = diff
@@ -1403,8 +1384,6 @@ class UnifiedDecisionEngine:
         if position.total_quantity <= self.quantity_epsilon:
             position.total_quantity = Decimal("0")
             position.is_open = False
-            if getattr(self, "stock_profile", None):
-                self.config_manager.get_config(symbol).quantity_config.base_quantity = Decimal("0")
             pair_key = self._build_position_key(
                 symbol,
                 spread_data.exchange_buy,
@@ -1878,7 +1857,7 @@ class UnifiedDecisionEngine:
         return self.scalping_active.get(symbol, False)
 
     def _calculate_net_spread(self, spread_data):
-        return spread_data.spread_pct - self._round_trip_fee_pct(spread_data) - (0.04 if getattr(self, "stock_profile", None) else 0)
+        return spread_data.spread_pct - self._round_trip_fee_pct(spread_data)
 
     def _round_trip_fee_pct(self, spread_data):
         if not self.deduct_fees:

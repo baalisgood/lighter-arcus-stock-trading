@@ -38,7 +38,6 @@ class DataReceiver:
         debug_config: DebugConfig,
         latest_store: Optional[LatestStore] = None,
         latest_only_mode: bool = False,
-        public_only: bool = False,
     ):
         """
         初始化数据接收器
@@ -48,7 +47,6 @@ class DataReceiver:
             ticker_queue: Ticker队列
             debug_config: Debug配置
         """
-        self.public_only = public_only
         self.orderbook_queue = orderbook_queue
         self.ticker_queue = ticker_queue
         self.debug = debug_config
@@ -113,18 +111,6 @@ class DataReceiver:
         received_at: Optional[datetime] = None,
     ) -> None:
         """统一出口：latest-only 模式写入 LatestStore，否则写入队列（队列满则丢旧保新）。"""
-        if self.public_only:
-            # Invalid snapshots must replace old BBOs immediately, not preserve a signal.
-            try:
-                bid, ask = orderbook.best_bid, orderbook.best_ask
-                values = (bid.price, bid.size, ask.price, ask.size)
-                valid = all(isinstance(value, Decimal) and value.is_finite() and value > 0 for value in values)
-                valid = valid and bid.price < ask.price
-            except (AttributeError, TypeError, ValueError, ArithmeticError):
-                valid = False
-            if not valid:
-                orderbook = OrderBookData(symbol=symbol, bids=[], asks=[], timestamp=timestamp,
-                                          exchange_timestamp=exchange_timestamp)
         if self._latest_only_mode and self._latest_store is not None:
             self._latest_store.set_orderbook(
                 exchange=exchange,
@@ -232,11 +218,11 @@ class DataReceiver:
                                 # 直接验证并入队
                                 try:
                                     # 验证数据
-                                    if not self.public_only:
-                                        if not orderbook.best_bid or not orderbook.best_ask:
-                                            return  # 静默忽略
-                                        if orderbook.best_bid.price <= 0 or orderbook.best_ask.price <= 0:
-                                            return  # 静默忽略
+                                    if not orderbook.best_bid or not orderbook.best_ask:
+                                        return  # 静默忽略
+                                    
+                                    if orderbook.best_bid.price <= 0 or orderbook.best_ask.price <= 0:
+                                        return  # 静默忽略
                                     
                                     self._publish_orderbook(
                                         exchange=_exchange_name,
@@ -644,11 +630,11 @@ class DataReceiver:
             # 🚀 快速验证（检查必需字段）
             # 所有交易所统一验证：必须同时有有效的bid和ask
             # （Backpack现在在适配器层维护完整的本地订单簿）
-            if not self.public_only:
-                if not orderbook.best_bid or not orderbook.best_ask:
-                    return  # 静默忽略
-                if orderbook.best_bid.price <= 0 or orderbook.best_ask.price <= 0:
-                    return  # 静默忽略
+            if not orderbook.best_bid or not orderbook.best_ask:
+                return  # 静默忽略
+            
+            if orderbook.best_bid.price <= 0 or orderbook.best_ask.price <= 0:
+                return  # 静默忽略
             
             # 🚀 立即入队（非阻塞）
             received_at = datetime.now()

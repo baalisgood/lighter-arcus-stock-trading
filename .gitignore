@@ -49,4 +49,4 @@ cache/
 *.gz
 
 # Empty public credential template only.
-!.env.stock.example
+!.env.example
