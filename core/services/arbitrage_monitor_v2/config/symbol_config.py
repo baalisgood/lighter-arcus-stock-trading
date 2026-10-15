@@ -14,6 +14,7 @@ from pathlib import Path
 import yaml
 import logging
 import re
+from .stock_preflight import merge_stock_grid
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,9 @@ class GridConfig:
     strict_persistence_check: bool  # 🔥 严格持续性检查：True=每秒都必须满足, False=每秒至少一次满足即可
 
     # 可选参数（有默认值）
+    first_close_ratio: float = 0.4
+    basis_config: Dict = field(default_factory=dict)
+    stock_session: Dict = field(default_factory=dict)
     split_order_size: Optional[float] = None  # 🔥 新参数：单笔订单数量（优先使用）
     require_orderbook_liquidity: bool = False  # 🔥 对手盘深度校验开关
     min_orderbook_quantity: Optional[float] = None  # 🔥 对手盘最小深度要求（绝对数量）
@@ -83,6 +87,7 @@ class QuantityConfig:
     quantity_mode: str  # "fixed" or "value"
     target_value_usdc: Decimal
     quantity_precision: int
+    split_order_amount_usdc: Decimal = Decimal('250')
     min_order_size: Decimal = Decimal('0')
     exchange_min_order_qty: Dict[str, Decimal] = field(default_factory=dict)
 
@@ -207,6 +212,8 @@ class SegmentedConfigManager:
 
         with open(self.config_path, 'r', encoding='utf-8') as f:
             data = yaml.safe_load(f)
+
+        self.market_constraints = data.get('market_constraints', {})
 
         # 加载系统模式配置
         self.system_mode = data.get('system_mode', {})
@@ -337,6 +344,9 @@ class SegmentedConfigManager:
                     grid_data.get('scalp_profit_threshold', 0.0)),
                 scalping_enabled=bool(
                     grid_data.get('scalping_enabled', False)),
+                first_close_ratio=float(grid_data.get('first_close_ratio', 0.4)),
+                basis_config=dict(grid_data.get('basis_config') or {}),
+                stock_session=dict(grid_data.get('stock_session') or {}),
                 scalping_trigger_segment=int(
                     grid_data.get('scalping_trigger_segment', 4)),
                 scalping_profit_threshold=float(
@@ -378,6 +388,7 @@ class SegmentedConfigManager:
                 ),
             ),
             quantity_config=QuantityConfig(
+                split_order_amount_usdc=Decimal(str(qty_data.get('split_order_amount_usdc', 250))),
                 base_quantity=Decimal(str(qty_data['base_quantity'])),
                 quantity_mode=qty_data['quantity_mode'],
                 target_value_usdc=Decimal(str(qty_data['target_value_usdc'])),
@@ -423,6 +434,7 @@ class SegmentedConfigManager:
                 'quantity_mode': self.default_config.quantity_config.quantity_mode,
                 'target_value_usdc': float(self.default_config.quantity_config.target_value_usdc),
                 'quantity_precision': self.default_config.quantity_config.quantity_precision,
+                'split_order_amount_usdc': self.default_config.quantity_config.split_order_amount_usdc,
                 'min_order_size': float(self.default_config.quantity_config.min_order_size),
                 'min_exchange_order_qty': dict(
                     getattr(self.default_config.quantity_config,
@@ -440,7 +452,10 @@ class SegmentedConfigManager:
         # 覆盖交易对特定配置
         for key in ['grid_config', 'quantity_config', 'risk_config']:
             if key in config_data:
-                merged[key].update(config_data[key])
+                if key == "grid_config":
+                    merged[key] = merge_stock_grid(merged[key], config_data[key])
+                else:
+                    merged[key].update(config_data[key])
 
         return self._build_symbol_config(symbol, merged)
 

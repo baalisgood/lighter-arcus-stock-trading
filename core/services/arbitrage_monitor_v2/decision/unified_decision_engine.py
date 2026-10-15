@@ -15,8 +15,10 @@
 """
 
 import logging
+import math
 import time
 from dataclasses import replace
+from ..utils.stock_signal import BasisState, cash_threshold
 from .arbitrage_decision import _round_trip_fee_breakdown
 from typing import Optional, Dict, Tuple, List
 from datetime import datetime
@@ -55,6 +57,9 @@ class UnifiedDecisionEngine:
         self.deduct_fees = deduct_fees
 
         # 持仓管理（symbol级聚合）
+        self._unfavorable_funding = {}
+        self._basis_states = {}
+        self._signal_prices = {}
         self.positions: Dict[str, SegmentedPosition] = {}
         # 套利对级别持仓：symbol -> pair_key -> SegmentedPosition
         self.pair_positions: Dict[str, Dict[str, SegmentedPosition]] = {}
@@ -101,6 +106,172 @@ class UnifiedDecisionEngine:
     # 核心决策接口
     # ========================================================================
 
+    def _config(self, symbol):
+        config = self.config_manager.get_config(symbol)
+        return replace(config, grid_config=replace(config.grid_config, initial_spread_threshold=cash_threshold(config.grid_config)))
+
+    def observe_basis(self, symbol, orderbooks, now=None):
+        cfg = self._config(symbol).grid_config.basis_config
+        if not cfg.get("enabled", False):
+            return
+        state = self._basis_states.setdefault(symbol, BasisState(
+            window=float(cfg.get("ema_seconds", 3600)), warmup=float(cfg.get("warmup_seconds", 3600)),
+            drift_window=float(cfg.get("drift_seconds", 3600)), drift_limit=float(cfg.get("max_drift_pct", .10)),
+            max_gap=float(cfg.get("max_gap_seconds", 3))))
+        value = None
+        try:
+            mids = {}
+            for exchange in ("lighter", "arcus"):
+                ob = orderbooks[exchange]
+                stamp = getattr(ob, "received_timestamp", None) or getattr(ob, "timestamp", None)
+                source_stamp = getattr(ob, "timestamp", None)
+                clock = time.time() if now is None else now
+                if stamp is None or source_stamp is None or any(clock - ts.timestamp() > state.max_gap or clock - ts.timestamp() < -1 for ts in (stamp, source_stamp)):
+                    raise ValueError("stale BBO")
+                bid, ask = ob.bids[0], ob.asks[0]
+                prices = [Decimal(str(bid.price)), Decimal(str(ask.price))]
+                sizes = [Decimal(str(bid.size)), Decimal(str(ask.size))]
+                if any(not x.is_finite() or x <= 0 for x in prices + sizes) or prices[0] > prices[1]:
+                    raise ValueError("invalid BBO")
+                mids[exchange] = sum(prices) / 2
+            value = float((mids["lighter"] - mids["arcus"]) / mids["arcus"] * 100)
+        except (KeyError, IndexError, ValueError, TypeError, AttributeError):
+            pass
+        state.observe(time.time() if now is None else now, value)
+
+    def basis_ready(self, symbol):
+        if not self._config(symbol).grid_config.basis_config.get("enabled", False):
+            return True
+        state = self._basis_states.get(symbol)
+        return bool(state and state.stable and state.last is not None and time.time() - state.last <= state.max_gap)
+
+    def adjusted_open_spread(self, symbol, spread):
+        if not self._config(symbol).grid_config.basis_config.get("enabled", False):
+            return spread.spread_pct
+        state = self._basis_states.get(symbol)
+        basis = state.ema if state and state.ready and state.ema is not None else 0.0
+        return spread.spread_pct - basis * (1 if spread.exchange_sell.lower() == "lighter" else -1)
+
+    def close_relative_spread(self, symbol, spread, direction=1):
+        if self._config(symbol).grid_config.basis_config.get("enabled", False):
+            # Closing buy is the original sell. Never infer direction from raw spread sign.
+            state = self._basis_states.get(symbol)
+            basis = state.ema if state and state.ready and state.ema is not None else 0.0
+            return -spread.spread_pct - basis * (1 if spread.exchange_buy.lower() == "lighter" else -1)
+        return -spread.spread_pct * (1 if direction >= 0 else -1)
+
+    def funding_risk_reason(self, symbol, funding, now=None):
+        config = self._config(symbol)
+        now = time.time() if now is None else now
+        if not config.grid_config.basis_config.get("funding_budget_enabled", False) or not config.risk_config.enable_funding_rate_risk or funding is None or funding.is_favorable_for_position or funding.funding_rate_diff < config.risk_config.funding_rate_diff_threshold:
+            self._unfavorable_funding.pop(symbol, None)
+            return None
+        previous = self._unfavorable_funding.get(symbol)
+        max_gap = float(config.grid_config.basis_config.get("funding_max_age_seconds", 60))
+        start = previous[0] if previous and 0 <= now - previous[1] <= max_gap else now
+        self._unfavorable_funding[symbol] = (start, now)
+        if now - start >= config.risk_config.max_unfavorable_funding_hours * 3600:
+            return "持续不利资金费率超过配置小时上限"
+        return None
+
+    def remaining_entry_notional(self, symbol):
+        position = self.positions.get(symbol)
+        if not position or position.total_quantity <= self.quantity_epsilon:
+            return Decimal("0")
+        result = Decimal("0")
+        tracked = Decimal("0")
+        for seg in position.get_open_segments():
+            prices = [Decimal(str(seg.open_price_buy)), Decimal(str(seg.open_price_sell))]
+            if any(not x.is_finite() or x <= 0 for x in prices):
+                return None
+            result += seg.open_quantity * max(prices)
+            tracked += seg.open_quantity
+        return result if abs(tracked - position.total_quantity) <= self.quantity_epsilon else None
+
+    def _quantity_after_fifo_close(self, symbol, target_notional):
+        position = self.positions.get(symbol)
+        if not position:
+            return Decimal("0")
+        current = self.remaining_entry_notional(symbol)
+        if current is None:
+            return position.total_quantity if target_notional > 0 else Decimal("0")
+        remove = max(Decimal("0"), current - target_notional)
+        closed = Decimal("0")
+        for seg in position.get_open_segments():
+            price = max(seg.open_price_buy, seg.open_price_sell)
+            take = min(seg.open_quantity, remove / price)
+            closed += take
+            remove -= take * price
+            if remove <= self.quantity_epsilon:
+                break
+        return max(Decimal("0"), position.total_quantity - closed)
+
+    def minimum_close_quantity(self, symbol, spread):
+        cfg = self._config(symbol)
+        minimum = max([cfg.quantity_config.min_order_size, *cfg.quantity_config.exchange_min_order_qty.values()])
+        constraints = getattr(self.config_manager, "market_constraints", {}).get((spread.buy_symbol or spread.symbol).split("-")[0], {})
+        low_price = min(spread.price_buy, spread.price_sell)
+        if low_price > 0:
+            minimum = max([minimum, *(Decimal(str(v)) / low_price for v in constraints.get("min_notional_by_exchange", {}).values())])
+        step = Decimal(1).scaleb(-cfg.quantity_config.quantity_precision)
+        return (minimum / step).to_integral_value(rounding=ROUND_CEILING) * step
+
+    def block_close_remainder(self, symbol, quantity):
+        if not hasattr(self, "close_blocked_reasons"):
+            self.close_blocked_reasons = {}
+        reason = "Manual review: exact reduce-only remainder below verified venue minima"
+        self.close_blocked_reasons[symbol] = reason
+        now = time.time()
+        key = f"dust:{symbol}"
+        if now - self._log_throttle_times.get(key, 0) >= 300:
+            logger.warning("⛔️ [%s] %s; quantity=%s", symbol, reason, quantity)
+            self._log_throttle_times[key] = now
+
+    def expected_funding_cost(self, symbol, funding):
+        cfg = self._config(symbol)
+        basis = cfg.grid_config.basis_config
+        if not basis.get("funding_budget_enabled", False) or not cfg.risk_config.enable_funding_rate_risk:
+            return 0.0
+        if funding is None:
+            return None
+        horizon = float(basis.get("funding_horizon_hours", 1))
+        buy, sell = float(funding.funding_rate_buy), float(funding.funding_rate_sell)
+        if not all(math.isfinite(value) for value in (horizon, buy, sell)) or horizon <= 0:
+            return None
+        return max(0.0, buy - sell) * horizon
+
+    def preview_order_quantity(self, symbol, spread, funding, *, is_open):
+        cfg = self._config(symbol)
+        price = max(spread.price_buy, spread.price_sell)
+        if not price.is_finite() or price <= 0:
+            return Decimal("0")
+        if is_open:
+            value = self.adjusted_open_spread(symbol, spread) - self._round_trip_fee_pct(spread)
+            funding_cost = self.expected_funding_cost(symbol, funding)
+            if funding_cost is None:
+                return Decimal("0")
+            value -= funding_cost
+            grid = min(self._calculate_current_grid(symbol, value), cfg.grid_config.max_segments)
+            occupied = self.remaining_entry_notional(symbol)
+            if grid <= 0 or occupied is None:
+                return Decimal("0")
+            budget = min(cfg.quantity_config.target_value_usdc * grid, cfg.risk_config.max_position_value)
+            available = max(Decimal("0"), budget - occupied)
+            price *= (1 + Decimal(str(cfg.grid_config.slippage_tolerance or 0))) ** 2
+            return self._format_quantity(min(available, cfg.quantity_config.split_order_amount_usdc) / price, cfg.quantity_config.quantity_precision)
+        self._signal_prices[symbol] = price
+        if not hasattr(self, "_close_minimums"):
+            self._close_minimums = {}
+        self._close_minimums[symbol] = self.minimum_close_quantity(symbol, spread)
+        actual = self._get_actual_position(symbol)
+        state = self._basis_states.get(symbol)
+        if cfg.grid_config.basis_config.get("enabled", False) and not (state and state.ready and state.last is not None and time.time() - state.last <= state.max_gap):
+            delta = actual
+        else:
+            target = self._calculate_target_position_by_spread(symbol, self.close_relative_spread(symbol, spread), cfg)
+            delta = max(Decimal("0"), actual - target)
+        return self._calculate_order_quantity(symbol, delta, cfg, is_close=True)
+
     async def should_open(
         self,
         symbol: str,
@@ -115,9 +286,23 @@ class UnifiedDecisionEngine:
         Returns:
             (是否开仓, 开仓数量)
         """
-        if self.deduct_fees:
-            fees = sum(_round_trip_fee_breakdown(spread_data, self.exchange_order_modes, self.exchange_fee_config))
-            spread_data = replace(spread_data, spread_pct=spread_data.spread_pct - fees)
+        config = self._config(symbol)
+        position = self.positions.get(symbol)
+        if config.quantity_config.quantity_mode == "value" and position and 0 < position.total_quantity < self.minimum_close_quantity(symbol, spread_data):
+            self.block_close_remainder(symbol, position.total_quantity)
+            return False, Decimal("0")
+        if symbol in getattr(self, "close_blocked_reasons", {}):
+            return False, Decimal("0")
+        if not self.basis_ready(symbol):
+            self._reset_spread_persistence(self._build_persistence_key(symbol, spread_data))
+            return False, Decimal("0")
+        basis_cfg = config.grid_config.basis_config
+        funding_cost = self.expected_funding_cost(symbol, funding_rate_data)
+        if funding_cost is None:
+            self._reset_spread_persistence(self._build_persistence_key(symbol, spread_data))
+            return False, Decimal("0")
+        self._signal_prices[symbol] = max(Decimal(str(spread_data.price_buy)), Decimal(str(spread_data.price_sell))) * (1 + Decimal(str(config.grid_config.slippage_tolerance or 0))) ** 2
+        spread_data = replace(spread_data, spread_pct=self.adjusted_open_spread(symbol, spread_data) - self._round_trip_fee_pct(spread_data) - funding_cost)
 
         # 🔥 检查交易所是否处于错误避让状态（日志节流在 backoff_controller 中处理）
         if self._backoff_controller:
@@ -130,7 +315,7 @@ class UnifiedDecisionEngine:
             logger.warning(
                 f"⚠️ [DEBUG] {symbol} 开仓检查: backoff_controller={self._backoff_controller}")
 
-        config = self.config_manager.get_config(symbol)
+        config = self._config(symbol)
 
         # 1. 计算当前格子
         current_grid = self._calculate_current_grid(
@@ -318,6 +503,19 @@ class UnifiedDecisionEngine:
 
         # 6. 计算差量（仅针对新增目标，不包含短缺部分）
         delta = target - effective_actual
+        if config.quantity_config.quantity_mode == "value":
+            occupied = self.remaining_entry_notional(symbol)
+            price = self._signal_prices.get(symbol, Decimal("0"))
+            if occupied is None or not price.is_finite() or price <= 0:
+                return False, Decimal("0")
+            budget = min(config.quantity_config.target_value_usdc * min(current_grid, config.grid_config.max_segments), config.risk_config.max_position_value)
+            remaining_budget = max(Decimal("0"), budget - occupied)
+            rounding_tolerance = price * Decimal(1).scaleb(-config.quantity_config.quantity_precision)
+            protection_reserve = budget * 2 * Decimal(str(config.grid_config.slippage_tolerance or 0))
+            if remaining_budget <= rounding_tolerance + protection_reserve:
+                return False, Decimal("0")
+            delta = min(remaining_budget, config.quantity_config.split_order_amount_usdc) / price
+            carry = Decimal("0")
 
         if delta <= self.quantity_epsilon:
             return False, Decimal('0')  # 无需开仓（只剩短缺，等待下一格触发）
@@ -384,7 +582,7 @@ class UnifiedDecisionEngine:
             # 开仓：判断是否还有剩余差量
             # 简化判断：如果本次订单后，不再需要开仓，则是最后一笔
             # 这里我们通过检查拆单配置来判断
-            config = self.config_manager.get_config(symbol)
+            config = self._config(symbol)
             min_order_qty = Decimal(
                 str(config.grid_config.min_partial_order_quantity))
 
@@ -420,12 +618,38 @@ class UnifiedDecisionEngine:
                 if exchange and self._backoff_controller.is_paused(exchange):
                     return False, Decimal('0'), "", None
 
-        config = self.config_manager.get_config(symbol)
+        config = self._config(symbol)
+        self._signal_prices[symbol] = max(Decimal(str(spread_data.price_buy)), Decimal(str(spread_data.price_sell)))
+        if not hasattr(self, "_close_minimums"):
+            self._close_minimums = {}
+        self._close_minimums[symbol] = self.minimum_close_quantity(symbol, spread_data)
 
         # 1. 检查是否有持仓
         actual = self._get_actual_position(symbol)
         if actual <= self.quantity_epsilon:
             return False, Decimal('0'), "", None
+
+        if config.grid_config.basis_config.get("enabled", False):
+            state = self._basis_states.get(symbol)
+            usable = bool(state and state.ready and state.last is not None and time.time() - state.last <= state.max_gap)
+            if not usable:
+                qty = self._calculate_order_quantity(symbol, actual, config, is_close=True)
+                position = self.positions[symbol]
+                left, profit = qty, Decimal("0")
+                for segment in position.get_open_segments():
+                    take = min(left, segment.open_quantity)
+                    if min(segment.open_price_buy, segment.open_price_sell) <= 0:
+                        return False, Decimal("0"), "", None
+                    profit += take * (spread_data.price_sell - segment.open_price_buy + segment.open_price_sell - spread_data.price_buy)
+                    entry_fees = (segment.entry_fee_buy_per_unit or Decimal("0")) + (segment.entry_fee_sell_per_unit or Decimal("0"))
+                    profit -= take * entry_fees
+                    left -= take
+                    if left <= self.quantity_epsilon:
+                        break
+                conservative = qty * max(spread_data.price_buy, spread_data.price_sell) * (Decimal(str(self._round_trip_fee_pct(spread_data))) / 100 + 2 * Decimal(str(config.grid_config.slippage_tolerance or 0)))
+                if left <= self.quantity_epsilon and profit > conservative:
+                    return True, qty, "FIFO profit fallback (basis unavailable)", None
+                return False, Decimal("0"), "", None
 
         # 2. 计算当前格子
         current_grid = self._calculate_current_grid(
@@ -460,7 +684,7 @@ class UnifiedDecisionEngine:
         Returns:
             格子ID（0表示价差不足）
         """
-        config = self.config_manager.get_config(symbol)
+        config = self._config(symbol)
 
         if spread_pct < config.grid_config.initial_spread_threshold:
             return 0
@@ -515,10 +739,9 @@ class UnifiedDecisionEngine:
 
         elif config.quantity_config.quantity_mode == "value":
             # 按金额模式（需要当前价格）
-            current_price = self._get_current_price(symbol)
+            current_price = self._signal_prices.get(symbol, Decimal("0"))
             if current_price <= Decimal('0'):
-                logger.warning(f"[{symbol}] 无法获取当前价格，使用固定数量")
-                return Decimal(str(effective_grid)) * config.quantity_config.base_quantity
+                return self._get_actual_position(symbol)
 
             target_value_per_grid = config.quantity_config.target_value_usdc
             quantity_per_grid = target_value_per_grid / current_price
@@ -540,7 +763,8 @@ class UnifiedDecisionEngine:
         symbol: str,
         delta: Decimal,
         config: SymbolConfig,
-        carry: Decimal = Decimal('0')
+        carry: Decimal = Decimal('0'),
+        *, is_close: bool = False,
     ) -> Decimal:
         """
         计算本次订单数量（拆单）
@@ -566,9 +790,19 @@ class UnifiedDecisionEngine:
         - 第1笔: 0.003, 第2笔: 0.003
         """
         abs_delta = abs(delta)
+        if abs_delta <= self.quantity_epsilon:
+            return Decimal("0")
         raw_needed = abs_delta + carry
 
-        base_order = self._calculate_split_quantity_core(abs_delta, config)
+        if config.quantity_config.quantity_mode == "value":
+            price = self._signal_prices.get(symbol, Decimal("0"))
+            if price <= 0:
+                position = self.positions.get(symbol)
+                price = max((max(seg.open_price_buy, seg.open_price_sell) for seg in position.get_open_segments()), default=Decimal("0")) if position else Decimal("0")
+            base_order = min(abs_delta, config.quantity_config.split_order_amount_usdc / price) if price > 0 else abs_delta
+            carry = Decimal("0")
+        else:
+            base_order = self._calculate_split_quantity_core(abs_delta, config)
         order_qty = base_order + carry
         order_qty = min(order_qty, raw_needed)
 
@@ -577,6 +811,21 @@ class UnifiedDecisionEngine:
         order_qty = self._format_quantity(order_qty, precision)
 
         min_order = config.quantity_config.min_order_size
+        if config.quantity_config.quantity_mode == "value":
+            min_order = max([min_order, *config.quantity_config.exchange_min_order_qty.values()])
+            if is_close:
+                min_order = max(min_order, getattr(self, "_close_minimums", {}).get(symbol, Decimal("0")))
+                total = self._get_actual_position(symbol)
+                tail = total - order_qty
+                if 0 < tail < min_order and order_qty < total:
+                    order_qty = self._format_quantity(max(Decimal("0"), total - min_order), precision)
+                if 0 < total < min_order:
+                    self.block_close_remainder(symbol, total)
+                    return Decimal("0")
+                getattr(self, "close_blocked_reasons", {}).pop(symbol, None)
+                if order_qty < min_order:
+                    # A tiny grid trim is not an untradeable entire position.
+                    return Decimal("0")
         if min_order and order_qty < min_order - self.quantity_epsilon:
             # 保存短缺，等待下一次与新拆单合并
             self.pending_open_shortfall[symbol] = raw_needed
@@ -678,7 +927,7 @@ class UnifiedDecisionEngine:
 
         # 盈利达标，触发平仓
         close_amount = abs(delta)
-        close_qty = self._calculate_order_quantity(symbol, delta, config)
+        close_qty = self._calculate_order_quantity(symbol, delta, config, is_close=True)
 
         # 🔥 标记退出剥头皮（在记录平仓时会实际退出）
         # 🔥 添加网格级别信息，与网格平仓保持一致
@@ -750,7 +999,7 @@ class UnifiedDecisionEngine:
 
         # 4. 🔥 使用平仓视角的价差（已经是基于实际盘口数据计算的）
         closing_spread_pct = spread_data.spread_pct
-        relative_spread = -closing_spread_pct * (1 if direction >= 0 else -1)
+        relative_spread = self.close_relative_spread(symbol, spread_data, direction)
 
         # 🔥 平仓视角：使用当前实时盘口价格（来自 spread_data）
         closing_buy_exchange = spread_data.exchange_buy or ""
@@ -841,7 +1090,7 @@ class UnifiedDecisionEngine:
         if close_delta <= self.quantity_epsilon:
             # 不需要平仓，但记录状态
             close_threshold = self._get_close_persistence_threshold(
-                actual, config)
+                actual, config, symbol)
             # 🔥 使用持仓的交易所信息作为key,避免1对多模式下日志被节流
             position = self.positions.get(symbol)
             if position:
@@ -867,7 +1116,7 @@ class UnifiedDecisionEngine:
         if not skip_persistence:
             close_key = f"{symbol}_close"
             close_threshold_value = self._get_close_persistence_threshold(
-                actual, config)
+                actual, config, symbol)
             if not self._check_spread_persistence(
                 close_key,
                 relative_spread,
@@ -901,8 +1150,11 @@ class UnifiedDecisionEngine:
         close_qty = self._calculate_order_quantity(
             symbol,
             close_delta,
-            config
+            config,
+            is_close=True,
         )
+        if close_qty <= self.quantity_epsilon:
+            return False, Decimal("0"), "", None
 
         # 🔥 平仓日志口径：显示“当前持仓段位Tn”（避免价差为负时打印成T0造成误解）
         # - 执行器侧的 “平仓Tn” 也是用持仓段位（position_segments）展示
@@ -943,7 +1195,7 @@ class UnifiedDecisionEngine:
             return Decimal('0')
 
         single_grid_qty = config.quantity_config.base_quantity
-        if single_grid_qty <= self.quantity_epsilon:
+        if config.quantity_config.quantity_mode != "value" and single_grid_qty <= self.quantity_epsilon:
             return Decimal('0')
 
         open_thresholds, close_thresholds = self._build_grid_thresholds(config)
@@ -952,7 +1204,9 @@ class UnifiedDecisionEngine:
 
         actual_position = self._get_actual_position(symbol)
         current_segments = 0
-        if actual_position > self.quantity_epsilon:
+        if config.quantity_config.quantity_mode == "value":
+            current_segments = self.get_current_segments(symbol)
+        elif actual_position > self.quantity_epsilon:
             ratio = (actual_position /
                      single_grid_qty).to_integral_value(rounding=ROUND_CEILING)
             current_segments = max(0, int(ratio))
@@ -974,12 +1228,15 @@ class UnifiedDecisionEngine:
         if target_segments <= 0:
             return Decimal('0')
 
+        if config.quantity_config.quantity_mode == "value":
+            return self._quantity_after_fifo_close(symbol, Decimal(target_segments) * config.quantity_config.target_value_usdc)
         return Decimal(str(target_segments)) * single_grid_qty
 
     def _get_close_persistence_threshold(
         self,
         actual_position: Decimal,
-        config: SymbolConfig
+        config: SymbolConfig,
+        symbol: Optional[str] = None,
     ) -> float:
         """
         计算当前持仓对应的平仓持续性阈值
@@ -988,11 +1245,13 @@ class UnifiedDecisionEngine:
         “回落到上一格” 的逻辑得到时间维度的确认。
         """
         base_qty = config.quantity_config.base_quantity
-        if base_qty <= self.quantity_epsilon:
-            return config.grid_config.initial_spread_threshold / 10.0
+        if config.quantity_config.quantity_mode != "value" and base_qty <= self.quantity_epsilon:
+            return config.grid_config.initial_spread_threshold * config.grid_config.first_close_ratio
 
-        current_segments = (
-            actual_position / base_qty).to_integral_value(rounding=ROUND_CEILING)
+        if config.quantity_config.quantity_mode == "value":
+            current_segments = self.get_current_segments(symbol or config.symbol)
+        else:
+            current_segments = (actual_position / base_qty).to_integral_value(rounding=ROUND_CEILING)
         current_segments = max(
             1, min(int(current_segments), config.grid_config.max_segments))
 
@@ -1112,7 +1371,7 @@ class UnifiedDecisionEngine:
 
         # 平仓阈值：T1 → T0，Tn → T(n-1)
         # 🔥 T0 = T1 * 0.4（40%）
-        t0 = initial * 0.4 if initial > 0 else 0.0
+        t0 = initial * config.grid_config.first_close_ratio if initial > 0 else 0.0
         close_thresholds = [t0]
         close_thresholds.extend(open_thresholds[:-1])
 
@@ -1141,13 +1400,21 @@ class UnifiedDecisionEngine:
         if not position:
             return 0
 
-        config = self.config_manager.get_config(symbol)
+        config = self._config(symbol)
         base_qty = config.quantity_config.base_quantity
-        if base_qty <= self.quantity_epsilon:
+        if config.quantity_config.quantity_mode != "value" and base_qty <= self.quantity_epsilon:
             return 0
 
-        segments = (position.total_quantity /
-                    base_qty).to_integral_value(rounding=ROUND_CEILING)
+        if config.quantity_config.quantity_mode == "value":
+            value = self.remaining_entry_notional(symbol)
+            if value is None:
+                return config.grid_config.max_segments
+            # Ignore less than one common quantity step of rounding residue.
+            price = max((max(seg.open_price_buy, seg.open_price_sell) for seg in position.get_open_segments()), default=Decimal("0"))
+            tolerance = price * Decimal(1).scaleb(-config.quantity_config.quantity_precision)
+            segments = ((max(Decimal("0"), value - tolerance)) / config.quantity_config.target_value_usdc).to_integral_value(rounding=ROUND_CEILING)
+        else:
+            segments = (position.total_quantity / base_qty).to_integral_value(rounding=ROUND_CEILING)
         return max(0, min(int(segments), config.grid_config.max_segments))
 
     def _calculate_segment_close_threshold(
@@ -1161,7 +1428,7 @@ class UnifiedDecisionEngine:
         🔥 用户最终确认的规则：
 
         网格定义:
-        - T0 = 0.02% (initial * 0.4, 不开仓区间)
+        - T0 = 0.02% (initial * config.grid_config.first_close_ratio, 不开仓区间)
         - T1 = 0.05% (initial)
         - T2 = 0.08% (initial + step)
         - T3 = 0.11% (initial + 2*step)
@@ -1201,7 +1468,7 @@ class UnifiedDecisionEngine:
             if grid <= 1:
                 # T1开仓 → T0平仓
                 # T0 = T1 * 0.4（40%）
-                close_threshold = initial * 0.4
+                close_threshold = initial * config.grid_config.first_close_ratio
             else:
                 # T2+开仓 → T(n-1)平仓
                 # T2 (grid=2) → T1平仓 = initial = 0.05%
@@ -1308,7 +1575,7 @@ class UnifiedDecisionEngine:
             or prev_total <= self.quantity_epsilon
         )
         if should_init_memory:
-            direction_flag = 1 if spread_data.spread_pct >= 0 else -1
+            direction_flag = 1 if self._config(symbol).grid_config.basis_config.get("enabled", False) or spread_data.spread_pct >= 0 else -1
             self.open_direction[pair_key] = direction_flag
             logger.info(
                 "🧠 [%s] 记忆已建立 | 方向=%s | 交易所=%s→%s",
@@ -1382,6 +1649,8 @@ class UnifiedDecisionEngine:
             position, quantity, spread_data)
 
         if position.total_quantity <= self.quantity_epsilon:
+            self._unfavorable_funding.pop(symbol, None)
+            getattr(self, "close_blocked_reasons", {}).pop(symbol, None)
             position.total_quantity = Decimal("0")
             position.is_open = False
             pair_key = self._build_position_key(
@@ -1642,6 +1911,10 @@ class UnifiedDecisionEngine:
             self._spread_persistence_state.pop(symbol, None)
             return self._compare_spread(spread_pct, threshold, comparison)
 
+        signature = (threshold, comparison, required_seconds)
+        previous = self._spread_persistence_state.get(symbol)
+        if previous is not None and previous.get("threshold_signature") != signature:
+            self._reset_spread_persistence(symbol)
         strict_mode = config.grid_config.strict_persistence_check
         state = self._spread_persistence_state.setdefault(
             symbol,
@@ -1655,6 +1928,7 @@ class UnifiedDecisionEngine:
             }
         )
 
+        state["threshold_signature"] = signature
         if strict_mode:
             return self._check_strict_persistence_internal(
                 symbol=symbol,
@@ -1843,10 +2117,10 @@ class UnifiedDecisionEngine:
     def _format_quantity(self, quantity: Decimal, precision: int) -> Decimal:
         """格式化数量精度"""
         if precision <= 0:
-            return quantity.quantize(Decimal('1'))
+            return quantity.quantize(Decimal('1'), rounding=ROUND_FLOOR)
 
         quantizer = Decimal('0.1') ** precision
-        return quantity.quantize(quantizer)
+        return quantity.quantize(quantizer, rounding=ROUND_FLOOR)
 
     def get_position(self, symbol: str) -> Optional[SegmentedPosition]:
         """获取持仓信息"""

@@ -1312,6 +1312,8 @@ class GlobalRiskController:
         if not cfg:
             return None
 
+        if getattr(cfg, 'quantity_mode', 'fixed') == 'value':
+            return None
         max_qty = getattr(cfg, 'max_position_quantity', None)
         if max_qty is None:
             return None
@@ -1428,6 +1430,7 @@ class GlobalRiskController:
         """检查所有交易所的余额"""
         low_balance_exchanges = set()
         critical_balance_exchanges = set()
+        fresh_equities = {}
 
         for exchange_name, adapter in self.exchange_adapters.items():
             try:
@@ -1438,6 +1441,8 @@ class GlobalRiskController:
                 if usdc_balance is None:
                     logger.warning(f"[风险控制] {exchange_name}: 未找到USDC余额")
                     continue
+
+                fresh_equities[exchange_name.lower()] = usdc_balance
 
                 # 检查余额不足平仓阈值
                 close_th = self._min_balance_close_threshold(exchange_name)
@@ -1476,6 +1481,14 @@ class GlobalRiskController:
                 else:
                     logger.error(
                         f"[风险控制] 检查{exchange_name}余额失败: {e}", exc_info=True)
+
+        bm = self.config.balance_management
+        if bm.equity_gap_alert_enabled and all(x in fresh_equities for x in ("lighter", "arcus")):
+            gap = abs(fresh_equities["lighter"] - fresh_equities["arcus"])
+            now = time.time()
+            if gap >= Decimal(str(bm.equity_gap_alert_threshold_usdc)) and now - getattr(self, "_last_equity_gap_alert", 0) >= bm.equity_gap_alert_interval_seconds:
+                logger.warning("⚖️ [权益差额提醒] Lighter/Arcus equity gap=%s USDC; manual review only", gap)
+                self._last_equity_gap_alert = now
 
         # 更新风险状态
         self.risk_status.low_balance_exchanges = low_balance_exchanges

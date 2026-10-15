@@ -706,6 +706,10 @@ class UnifiedOrchestratorRuntimeMixin:
                         entry_sell = leg_meta.get((sell_ex, std_sym), {}).get(
                             "entry_price", Decimal("0"))
 
+                        if config.quantity_config.quantity_mode == "value":
+                            value = qty * max(entry_buy, entry_sell)
+                            inferred = max(1, min(max_segments, int((value / config.quantity_config.target_value_usdc).to_integral_value(rounding=ROUND_UP))))
+
                         spread_data = SpreadData(
                             symbol=std_sym,
                             exchange_buy=buy_ex,
@@ -896,6 +900,10 @@ class UnifiedOrchestratorRuntimeMixin:
                     "entry_price", Decimal("0"))
                 entry_sell = leg_meta.get((sell_ex, std_sym), {}).get(
                     "entry_price", Decimal("0"))
+
+                if config.quantity_config.quantity_mode == "value":
+                    value = qty * max(entry_buy, entry_sell)
+                    inferred = max(1, min(max_segments, int((value / config.quantity_config.target_value_usdc).to_integral_value(rounding=ROUND_UP))))
 
                 spread_data = SpreadData(
                     symbol=std_sym,
@@ -1566,7 +1574,11 @@ class UnifiedOrchestratorRuntimeMixin:
                         cfg = self.config_manager.get_config(symbol_key)
                     except Exception:
                         cfg = self.config_manager.get_config(base_symbol)
-                    base_qty = Decimal(str(cfg.quantity_config.base_quantity))
+                    if cfg.quantity_config.quantity_mode == "value":
+                        target_value = cfg.quantity_config.target_value_usdc
+                        base_qty = pos.total_quantity - self.decision_engine._quantity_after_fifo_close(symbol_key, max(Decimal("0"), (self.decision_engine.remaining_entry_notional(symbol_key) or Decimal("0")) - target_value))
+                    else:
+                        base_qty = Decimal(str(cfg.quantity_config.base_quantity))
                 except Exception:
                     base_qty = Decimal("0")
 
@@ -2327,7 +2339,7 @@ class UnifiedOrchestratorRuntimeMixin:
         calc_net = getattr(self.decision_engine, "_calculate_net_spread", None)
         if callable(calc_net):
             try:
-                net_spread_pct = calc_net(spread_data)
+                net_spread_pct = self.decision_engine.adjusted_open_spread(symbol, spread_data) - self.decision_engine._round_trip_fee_pct(spread_data)
             except Exception:
                 pass
 

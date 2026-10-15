@@ -103,9 +103,21 @@ class UnifiedOrchestratorOpenMixin:
                     return
             if self._should_skip_due_to_dual_limit_backoff(symbol):
                 return
-            symbol_config = self.config_manager.get_config(symbol)
+            symbol_config = self.decision_engine._config(symbol)
+            self.decision_engine._config(symbol)
+            decision_spread_pct = self.decision_engine.adjusted_open_spread(symbol, spread_data)
             slippage_pct = self._resolve_slippage_pct(symbol, symbol_config)
 
+            if symbol_config.quantity_config.quantity_mode == "value":
+                try:
+                    prepared = self._prepare_stock_signal(symbol, spread_data, funding_rate_data, is_open=True)
+                except ValueError:
+                    self.decision_engine._reset_spread_persistence(self.decision_engine._build_persistence_key(symbol, spread_data))
+                    return
+                if prepared is None:
+                    return
+                spread_data = prepared
+                decision_spread_pct = self.decision_engine.adjusted_open_spread(symbol, spread_data)
             # ===== EMA价差门槛：持续喂样本（低开销：仅在启用时执行一次 O(1) 更新）=====
             ema_open_obs: Optional[EmaUpdateResult] = None
             try:
@@ -127,7 +139,7 @@ class UnifiedOrchestratorOpenMixin:
                     ema_open_obs = self._observe_spread_ema(
                         symbol=symbol,
                         action="open",
-                        value_pct=float(spread_data.spread_pct),
+                        value_pct=float(decision_spread_pct),
                         window_seconds=float(
                             getattr(gc, "ema_spread_window_seconds", 30.0) or 30.0),
                         strict=bool(
@@ -193,7 +205,7 @@ class UnifiedOrchestratorOpenMixin:
 
             # 🔢 当前网格层级（后续日志与EMA门槛复用）
             grid_level = self.decision_engine.get_grid_level(
-                symbol, self.decision_engine._calculate_net_spread(spread_data))
+                symbol, decision_spread_pct - self.decision_engine._round_trip_fee_pct(spread_data))
 
             # ===== 风控闸门：仅禁止开仓（平仓不受影响）=====
             # 1) 余额不足（权益不足）-> 只允许平仓
@@ -259,7 +271,7 @@ class UnifiedOrchestratorOpenMixin:
             # ===== 新增门槛：EMA价差门槛（严格模式断秒同时拦截开仓/平仓）=====
             ema_ok, ema_reason = self._passes_ema_spread_gate_open(
                 symbol=symbol,
-                spread_pct=float(spread_data.spread_pct),
+                spread_pct=float(decision_spread_pct),
                 grid_level=grid_level,
                 observed=ema_open_obs,
             )
@@ -430,13 +442,19 @@ class UnifiedOrchestratorOpenMixin:
                         sell_symbol,
                         max_age_seconds=self.get_data_freshness_seconds(spread_data.exchange_sell),
                     )
+                    if symbol_config.grid_config.basis_config.get("enabled", False) and not (buy_ob and sell_ob):
+                        return
                     if buy_ob and sell_ob:
                         buy_agg = aggregate_top_n_vwap(
-                            buy_ob, is_buy=True, max_levels=agg_n, target_qty=open_quantity
+                            buy_ob, is_buy=True, max_levels=agg_n, target_qty=open_quantity,
+                            price_limit=buy_ob.best_ask.price * (1 + Decimal(str(slippage_pct))) if symbol_config.quantity_config.quantity_mode == "value" else None
                         )
                         sell_agg = aggregate_top_n_vwap(
-                            sell_ob, is_buy=False, max_levels=agg_n, target_qty=open_quantity
+                            sell_ob, is_buy=False, max_levels=agg_n, target_qty=open_quantity,
+                            price_limit=sell_ob.best_bid.price * (1 - Decimal(str(slippage_pct))) if symbol_config.quantity_config.quantity_mode == "value" else None
                         )
+                        if symbol_config.grid_config.basis_config.get("enabled", False) and not (buy_agg.fully_covered and sell_agg.fully_covered):
+                            return
                         buy_mode = "BBO"
                         sell_mode = "BBO"
 
@@ -463,7 +481,18 @@ class UnifiedOrchestratorOpenMixin:
 
                         price_mode = f"buy={buy_mode} sell={sell_mode}"
             except Exception:
+                if symbol_config.grid_config.basis_config.get("enabled", False):
+                    return
                 price_mode = "BBO"
+
+            if symbol_config.grid_config.basis_config.get("enabled", False):
+                funding_cost = 0.0
+                if symbol_config.risk_config.enable_funding_rate_risk and funding_rate_data is not None:
+                    funding_cost = max(0.0, funding_rate_data.funding_rate_buy - funding_rate_data.funding_rate_sell) * float(symbol_config.grid_config.basis_config.get("funding_horizon_hours", 1))
+                adjusted = self.decision_engine.adjusted_open_spread(symbol, spread_data) - self.decision_engine._round_trip_fee_pct(spread_data) - funding_cost
+                threshold = self.decision_engine._calculate_open_threshold(symbol, grid_level, symbol_config)
+                if adjusted < threshold:
+                    return
 
             if self._should_log_open_intent(symbol, spread_data.spread_pct):
                 open_message = (
@@ -472,7 +501,7 @@ class UnifiedOrchestratorOpenMixin:
                     f"当前持仓={current_qty} | "
                     f"买{spread_data.exchange_buy}@{spread_data.price_buy:.2f}(偏移{buy_offset_str}) "
                     f"卖{spread_data.exchange_sell}@{spread_data.price_sell:.2f}(偏移{sell_offset_str}) | "
-                    f"开仓价差={spread_data.spread_pct:.4f}% | "
+                    f"原始价差={spread_data.spread_pct:.4f}% 调整后={self.decision_engine.adjusted_open_spread(symbol, spread_data):.4f}% | "
                     f"价格模式={price_mode} | "
                     f"平仓视角: 买{closing_buy_exchange}@{closing_buy_price:.2f} "
                     f"卖{closing_sell_exchange}@{closing_sell_price:.2f} "
@@ -688,6 +717,18 @@ class UnifiedOrchestratorOpenMixin:
             orderbook_sell_bid=orderbook_sell_bid,
         )
         exec_request._expected_position_quantity = position.total_quantity if position else Decimal("0")
+        stock_cfg = self.decision_engine._config(symbol)
+        if stock_cfg.quantity_config.quantity_mode == "value":
+            if not orderbook_buy or not orderbook_sell or not orderbook_buy.best_ask or not orderbook_sell.best_bid:
+                return
+            exec_request.price_buy = orderbook_buy.best_ask.price
+            exec_request.price_sell = orderbook_sell.best_bid.price
+            exec_request.orderbook_buy_ask = exec_request.price_buy
+            exec_request.orderbook_sell_bid = exec_request.price_sell
+            slip = Decimal(str(slippage_pct or 0))
+            exec_request._stock_price_bound_buy = exec_request.price_buy * (1 + slip)
+            exec_request._stock_price_bound_sell = exec_request.price_sell * (1 - slip)
+            exec_request._stock_order_amount_usdc = stock_cfg.quantity_config.split_order_amount_usdc
         result: Optional[ExecutionResult] = None
         try:
             # ✅ 仅对“限价+市价(limit_market)”启用的最小下单量拦截：

@@ -190,8 +190,20 @@ class ArcusAdapter(ExchangeAdapter):
             if not 0 <= slippage <= D('.1'):
                 raise ValueError('Arcus market slippage must be 0..10%')
             price = best.price * (1 + slippage if side == OrderSide.BUY else 1 - slippage)
+            bound = params.get("price_bound")
+            if bound is not None:
+                bound = D(str(bound))
+                if not bound.is_finite() or bound <= 0:
+                    raise ValueError('Invalid stock price bound')
+                price = min(price, bound) if side == OrderSide.BUY else max(price, bound)
             tick = self._price_tick(market, price)
-            price = (price / tick).to_integral_value(rounding=ROUND_UP if side == OrderSide.BUY else ROUND_DOWN) * tick
+            rounding = (ROUND_DOWN if side == OrderSide.BUY else ROUND_UP) if bound is not None else (ROUND_UP if side == OrderSide.BUY else ROUND_DOWN)
+            price = (price / tick).to_integral_value(rounding=rounding) * tick
+            cap = params.get("max_order_notional_usdc")
+            if cap is not None:
+                cap = D(str(cap)); reference = D(str(params.get("reference_price", price)))
+                if not cap.is_finite() or cap <= 0 or not reference.is_finite() or reference <= 0 or amount * (max(price, reference) if side == OrderSide.BUY else reference) > cap:
+                    raise ValueError('Stock order exceeds protected reference notional')
             mark = D(market.get('markPrice', '0'))
             if mark <= 0 or abs(price / mark - 1) > D('.1'):
                 raise ValueError('Arcus protective market price exceeds mark bound')

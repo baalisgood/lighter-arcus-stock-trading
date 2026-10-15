@@ -83,8 +83,8 @@ class UnifiedOrchestratorCloseMixin:
                 if symbol not in self._position_risk_close_failed:
                     reasons.pop(symbol, None)
             elif not self.monitor_only_mode:
-                config = self.config_manager.get_config(symbol)
-                reason = reasons.get(symbol) or self._position_loss_reason(position, spread_data, config)
+                config = self.decision_engine._config(symbol)
+                reason = reasons.get(symbol) or self._position_loss_reason(position, spread_data, config) or self.decision_engine.funding_risk_reason(symbol, funding_rate_data)
                 if reason:
                     await self._close_position_for_risk(symbol, reason)
                     return
@@ -119,9 +119,19 @@ class UnifiedOrchestratorCloseMixin:
                         throttle_seconds=60.0,
                     )
                     return
-            symbol_config = self.config_manager.get_config(symbol)
+            symbol_config = self.decision_engine._config(symbol)
             slippage_pct = self._resolve_slippage_pct(symbol, symbol_config)
 
+            if symbol_config.quantity_config.quantity_mode == "value":
+                try:
+                    prepared = self._prepare_stock_signal(symbol, spread_data, funding_rate_data, is_open=False)
+                except ValueError:
+                    self.decision_engine._reset_spread_persistence(f"{symbol}_close")
+                    return
+                if prepared is None:
+                    return
+                spread_data = prepared
+                self._record_price_sample(symbol, spread_data, action="close")
             # ===== EMA价差门槛：持续喂样本（平仓用 should_close 同口径 relative_spread）=====
             ema_close_obs: Optional[EmaUpdateResult] = None
             relative_spread_for_ema: Optional[float] = None
@@ -155,8 +165,7 @@ class UnifiedOrchestratorCloseMixin:
                     else:
                         direction = 1
                     closing_spread_pct = float(spread_data.spread_pct)
-                    relative_spread_for_ema = -closing_spread_pct * \
-                        (1 if direction >= 0 else -1)
+                    relative_spread_for_ema = self.decision_engine.close_relative_spread(symbol, spread_data, direction)
                     ema_close_obs = self._observe_spread_ema(
                         symbol=symbol,
                         action="close",
@@ -192,8 +201,7 @@ class UnifiedOrchestratorCloseMixin:
             if relative_spread_for_ema is None:
                 # 兜底：尽量对齐 should_close 口径；无法获取方向则取绝对值
                 try:
-                    relative_spread_for_ema = abs(
-                        float(spread_data.spread_pct))
+                    relative_spread_for_ema = self.decision_engine.close_relative_spread(symbol, spread_data)
                 except Exception:
                     relative_spread_for_ema = 0.0
             ema_ok, ema_reason = self._passes_ema_spread_gate_close(
@@ -201,6 +209,8 @@ class UnifiedOrchestratorCloseMixin:
                 relative_spread_pct=float(relative_spread_for_ema),
                 observed=ema_close_obs,
             )
+            if reason == "FIFO profit fallback (basis unavailable)":
+                ema_ok = True
             if not ema_ok:
                 self._log_with_throttle(
                     key=f"ema_spread_gate:close:{symbol}",
@@ -221,10 +231,10 @@ class UnifiedOrchestratorCloseMixin:
                     try:
                         close_th = float(self.decision_engine._get_close_persistence_threshold(
                             # type: ignore[attr-defined]
-                            actual_qty, symbol_config))
+                            actual_qty, symbol_config, symbol))
                     except Exception:
                         close_th = float(
-                            getattr(gc, "initial_spread_threshold", 0.0) or 0.0) * 0.4
+                            getattr(gc, "initial_spread_threshold", 0.0) or 0.0) * float(getattr(gc, "first_close_ratio", 0.4))
                     max_ema = close_th + delta
                     self._log_with_throttle(
                         key=f"ema_spread_gate:close_pass:{symbol}",
@@ -317,13 +327,19 @@ class UnifiedOrchestratorCloseMixin:
                         spread_data.sell_symbol or symbol,
                         max_age_seconds=self.get_data_freshness_seconds(spread_data.exchange_sell),
                     )
+                    if symbol_config.grid_config.basis_config.get("enabled", False) and not (buy_ob and sell_ob):
+                        return
                     if buy_ob and sell_ob:
                         buy_agg = aggregate_top_n_vwap(
-                            buy_ob, is_buy=True, max_levels=agg_n, target_qty=close_quantity
+                            buy_ob, is_buy=True, max_levels=agg_n, target_qty=close_quantity,
+                            price_limit=buy_ob.best_ask.price * (1 + Decimal(str(slippage_pct))) if symbol_config.quantity_config.quantity_mode == "value" else None
                         )
                         sell_agg = aggregate_top_n_vwap(
-                            sell_ob, is_buy=False, max_levels=agg_n, target_qty=close_quantity
+                            sell_ob, is_buy=False, max_levels=agg_n, target_qty=close_quantity,
+                            price_limit=sell_ob.best_bid.price * (1 - Decimal(str(slippage_pct))) if symbol_config.quantity_config.quantity_mode == "value" else None
                         )
+                        if symbol_config.grid_config.basis_config.get("enabled", False) and not (buy_agg.fully_covered and sell_agg.fully_covered):
+                            return
                         buy_mode = "BBO"
                         sell_mode = "BBO"
 
@@ -347,6 +363,8 @@ class UnifiedOrchestratorCloseMixin:
 
                         price_mode = f"buy={buy_mode} sell={sell_mode}"
             except Exception:
+                if symbol_config.grid_config.basis_config.get("enabled", False):
+                    return
                 price_mode = "BBO"
 
             # 🔥 平仓意图日志 - 单行格式,包含关键信息
@@ -565,6 +583,22 @@ class UnifiedOrchestratorCloseMixin:
         if (spread_data.exchange_buy != position.exchange_sell
                 or spread_data.exchange_sell != position.exchange_buy):
             return
+        cfg = self.decision_engine._config(symbol)
+        if cfg.quantity_config.quantity_mode == "value":
+            if close_quantity < self.decision_engine.minimum_close_quantity(symbol, spread_data):
+                self.decision_engine.block_close_remainder(symbol, position.total_quantity)
+                return
+            try:
+                spread_data = self._protected_spread_view(symbol, spread_data, close_quantity)
+            except ValueError:
+                return
+            if reason.startswith("网格平仓"):
+                allowed, latest_qty, _, _ = await self.decision_engine.should_close(symbol, spread_data, funding_rate_data)
+                if not allowed or latest_qty < close_quantity:
+                    return
+                relative = self.decision_engine.close_relative_spread(symbol, spread_data)
+                if not self._passes_ema_spread_gate_close(symbol=symbol, relative_spread_pct=relative)[0]:
+                    return
         net_profit = self._estimate_fifo_close_profit(position, close_quantity, spread_data)
         if net_profit is None or net_profit < 0:
             logger.warning("⏸️ [净收益门槛] %s: FIFO成本缺失或预计收益不足: %s", symbol, net_profit)
@@ -614,6 +648,17 @@ class UnifiedOrchestratorCloseMixin:
             orderbook_sell_ask=orderbook_sell_ask,
             orderbook_sell_bid=orderbook_sell_bid,
         )
+        stock_cfg = self.decision_engine._config(symbol)
+        if stock_cfg.quantity_config.quantity_mode == "value":
+            if not orderbook_buy or not orderbook_sell or not orderbook_buy.best_ask or not orderbook_sell.best_bid:
+                return
+            exec_request.price_buy = orderbook_buy.best_ask.price
+            exec_request.price_sell = orderbook_sell.best_bid.price
+            exec_request.orderbook_buy_ask = exec_request.price_buy
+            exec_request.orderbook_sell_bid = exec_request.price_sell
+            slip = Decimal(str(slippage_pct or 0))
+            exec_request._stock_price_bound_buy = exec_request.price_buy * (1 + slip)
+            exec_request._stock_price_bound_sell = exec_request.price_sell * (1 - slip)
         result: Optional[ExecutionResult] = None
         try:
             result = await self.executor.execute_arbitrage(exec_request)

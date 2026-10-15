@@ -118,7 +118,7 @@ class UnifiedOrchestratorEmaMixin:
             - 严格模式断秒 -> 拦截
             """
             try:
-                cfg = self.config_manager.get_config(symbol).grid_config
+                cfg = self.decision_engine._config(symbol).grid_config
             except Exception:
                 return True, None
             if not bool(getattr(cfg, "ema_spread_gate_enabled", False)):
@@ -166,7 +166,7 @@ class UnifiedOrchestratorEmaMixin:
             - 严格模式断秒 -> 拦截
             """
             try:
-                cfg_obj = self.config_manager.get_config(symbol)
+                cfg_obj = self.decision_engine._config(symbol)
             except Exception:
                 return True, None
             cfg = cfg_obj.grid_config
@@ -191,9 +191,9 @@ class UnifiedOrchestratorEmaMixin:
             pos = self.decision_engine.get_position(symbol)
             actual_qty = pos.total_quantity if pos else Decimal("0")
             try:
-                close_threshold = float(self.decision_engine._get_close_persistence_threshold(actual_qty, cfg_obj))  # type: ignore[attr-defined]
+                close_threshold = float(self.decision_engine._get_close_persistence_threshold(actual_qty, cfg_obj, symbol))  # type: ignore[attr-defined]
             except Exception:
-                close_threshold = float(getattr(cfg, "initial_spread_threshold", 0.0) or 0.0) * 0.4
+                close_threshold = float(getattr(cfg, "initial_spread_threshold", 0.0) or 0.0) * float(getattr(cfg, "first_close_ratio", 0.4))
             max_ema = close_threshold + delta
             if res.ema is None:
                 return False, f"EMA尚未初始化(window={window}s)"

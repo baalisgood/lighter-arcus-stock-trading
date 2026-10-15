@@ -105,6 +105,10 @@ class DecisionConfig:
 @dataclass
 class QuantityConfig:
     """数量配置（代币本位）"""
+    quantity_mode: str = "fixed"
+    single_order_amount_usdc: float = 0.0
+    target_value_usdc: float = 0.0
+    max_position_usdc: float = 0.0
     single_order_quantity: float = 0.1       # 单笔下单数量（代币本位）
     max_position_quantity: float = 0.2       # 最大持仓数量（代币本位）
     quantity_precision: int = 4              # 数量精度（小数位数，由配置指定）
@@ -248,6 +252,9 @@ class PositionManagementConfig:
 @dataclass
 class BalanceManagementConfig:
     """账户余额管理配置"""
+    equity_gap_alert_enabled: bool = False
+    equity_gap_alert_threshold_usdc: float = 1000.0
+    equity_gap_alert_interval_seconds: float = 300.0
     min_balance_warning: float = 1000.0  # 余额不足警告阈值（USDC价值）
     min_balance_close_position: float = 500.0  # 余额不足平仓阈值（USDC价值）
     # 🔥 按交易所覆盖（key 不区分大小写），用于多交易所场景的个性化风控

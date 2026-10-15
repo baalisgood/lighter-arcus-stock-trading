@@ -1675,6 +1675,11 @@ class ArbitrageExecutor:
 
                         if exchange_name == 'arcus':
                             params['slippage_tolerance_pct'] = slippage_override or self._get_slippage_percent(request)
+                        bound = getattr(request, "_stock_price_bound_buy" if is_buy else "_stock_price_bound_sell", None)
+                        if bound is not None:
+                            params["price_bound"] = bound
+                            params["max_order_notional_usdc"] = getattr(request, "_stock_order_amount_usdc", None)
+                            params["reference_price"] = request.price_buy if is_buy else request.price_sell
 
                         # 🔥 Lighter: REST 市价单支持 slippage_multiplier（用于复用现有“滑点倍数放大”方案）
                         if (
@@ -1705,6 +1710,7 @@ class ArbitrageExecutor:
                             side=side,
                             order_type=OrderType.MARKET,
                             amount=quantity,
+                            price=(request.price_buy if is_buy else request.price_sell) if bound is not None else None,
                             params=params or None
                         )
 
@@ -1778,6 +1784,12 @@ class ArbitrageExecutor:
             if target_price and target_price > Decimal("0"):
                 payload[0]["target_price"] = target_price
                 price_source = "决策引擎信号价"
+
+        bound = getattr(request, "_stock_price_bound_buy" if is_buy else "_stock_price_bound_sell", None)
+        if bound is not None:
+            payload[0]["price_bound"] = bound
+            payload[0]["max_order_notional_usdc"] = getattr(request, "_stock_order_amount_usdc", None)
+            payload[0]["reference_price"] = request.price_buy if is_buy else request.price_sell
 
         # 🔥 获取滑点参数
         slippage_percent = slippage_override
@@ -3225,7 +3237,11 @@ class ArbitrageExecutor:
     def _validate_pair_quantity(self, request):
         constraints = getattr(self, "market_constraints", {}).get((request.buy_symbol or request.symbol).split("-")[0])
         if not constraints:
+            if getattr(self, "market_constraints", {}):
+                raise ValueError("Missing active stock market constraints")
             return
+        if set(constraints.get("min_notional_by_exchange", {})) != {"lighter", "arcus"}:
+            raise ValueError("Missing venue minimum notional constraints")
         quantity = request.quantity
         step = Decimal(str(constraints["quantity_step"]))
         minimum = Decimal(str(constraints["min_quantity"]))

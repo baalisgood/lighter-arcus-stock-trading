@@ -123,6 +123,9 @@ class UnifiedOrchestratorConfigMixin:
         bm_data = rc_data.get('balance_management', {})
 
         balance_cfg = risk_config.balance_management
+        for key in ('equity_gap_alert_enabled', 'equity_gap_alert_threshold_usdc', 'equity_gap_alert_interval_seconds'):
+            if key in bm_data:
+                setattr(balance_cfg, key, bm_data[key])
         balance_cfg.min_balance_warning = float(
             bm_data.get('min_balance_warning', balance_cfg.min_balance_warning)
         )

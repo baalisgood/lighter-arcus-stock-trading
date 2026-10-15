@@ -65,6 +65,7 @@ def aggregate_top_n_vwap(
     is_buy: bool,
     max_levels: int,
     target_qty: Optional[Decimal] = None,
+    price_limit: Optional[Decimal] = None,
 ) -> AggregatedBookSide:
     """
     使用前 N 档计算 VWAP。
@@ -96,12 +97,14 @@ def aggregate_top_n_vwap(
     for lvl in slice_levels:
         px = _to_decimal(getattr(lvl, "price", None))
         sz = _to_decimal(getattr(lvl, "size", None))
-        if px is None or px <= Decimal("0"):
+        if px is None or not px.is_finite() or px <= Decimal("0"):
             continue
+        if price_limit is not None and ((is_buy and px > price_limit) or (not is_buy and px < price_limit)):
+            break
         if sz is None:
             # 数量缺失：无法做聚合（但上层可选择降级）
             return AggregatedBookSide(vwap_price=None, total_available=None, used_levels=0, fully_covered=False)
-        if sz <= Decimal("0"):
+        if not sz.is_finite() or sz <= Decimal("0"):
             continue
 
         used_levels += 1

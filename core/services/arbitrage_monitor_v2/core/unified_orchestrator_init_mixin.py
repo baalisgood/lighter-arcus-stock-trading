@@ -382,6 +382,8 @@ class UnifiedOrchestratorInitMixin:
         """
         # 加载配置
         self.execution_config_path = execution_config_path or Path("config/arbitrage/arbitrage_lighter_arcus.yaml")
+        from ..config.stock_preflight import validate_stock_profiles
+        validate_stock_profiles(segmented_config_path or Path("config/arbitrage/arbitrage_segmented.yaml"), self.execution_config_path)
         self.config_manager = SegmentedConfigManager(segmented_config_path)
         # 🔔 声音报警（用于余额风控等关键事件；可在 system_mode 中覆盖参数）
         self._sound_alarm = SoundAlarm.from_system_mode(self.config_manager.get_system_mode())

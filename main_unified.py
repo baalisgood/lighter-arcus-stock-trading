@@ -113,6 +113,8 @@ def parse_args():
 async def main():
     """主入口函数"""
     args = parse_args()
+    from core.services.arbitrage_monitor_v2.config.stock_preflight import validate_stock_profiles
+    validate_stock_profiles(args.config, args.execution_config)
     _load_runtime_environment()
     
     # 配置Debug选项

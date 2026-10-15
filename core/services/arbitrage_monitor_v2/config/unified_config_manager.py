@@ -176,6 +176,8 @@ class UnifiedConfigManager:
                     precision_value = 4
                 
                 single_qty = qty_data.get('single_order_quantity')
+                if single_qty is None and qty_data.get('quantity_mode') == 'value':
+                    single_qty = 0
                 if single_qty is None and 'single_order_amount_usdc' in qty_data:
                     single_qty = qty_data.get('single_order_amount_usdc')
                     logger.warning(
@@ -189,6 +191,8 @@ class UnifiedConfigManager:
                     single_qty = 0.1
                 
                 max_qty = qty_data.get('max_position_quantity')
+                if max_qty is None and qty_data.get('quantity_mode') == 'value':
+                    max_qty = 0
                 if max_qty is None and 'max_position_usdc' in qty_data:
                     max_qty = qty_data.get('max_position_usdc')
                     logger.warning(
@@ -202,6 +206,10 @@ class UnifiedConfigManager:
                     max_qty = 0.2
                 
                 self.config.execution.quantity_config[symbol_or_default] = QuantityConfig(
+                    quantity_mode=qty_data.get("quantity_mode", "fixed"),
+                    single_order_amount_usdc=float(qty_data.get("single_order_amount_usdc", 0)),
+                    target_value_usdc=float(qty_data.get("target_value_usdc", 0)),
+                    max_position_usdc=float(qty_data.get("max_position_usdc", 0)),
                     single_order_quantity=float(single_qty),
                     max_position_quantity=float(max_qty),
                     quantity_precision=int(precision_value),
@@ -547,6 +555,9 @@ class UnifiedConfigManager:
         if 'balance_management' in data:
             bm_data = data['balance_management']
             self.config.risk_control.balance_management = BalanceManagementConfig(
+                equity_gap_alert_enabled=bool(bm_data.get('equity_gap_alert_enabled', False)),
+                equity_gap_alert_threshold_usdc=float(bm_data.get('equity_gap_alert_threshold_usdc', 1000)),
+                equity_gap_alert_interval_seconds=float(bm_data.get('equity_gap_alert_interval_seconds', 300)),
                 min_balance_warning=bm_data.get('min_balance_warning', 1000.0),
                 min_balance_close_position=bm_data.get('min_balance_close_position', 500.0),
                 check_interval=bm_data.get('check_interval', 60),

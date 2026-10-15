@@ -65,8 +65,14 @@ class RiskControlUtils:
 
     # Price stability -----------------------------------------------------
 
-    def record_price_sample(self, symbol: str, spread_data) -> None:
-        history = self._price_history.setdefault(symbol, deque())
+    def _history_key(self, symbol, action):
+        cfg = self.orc.config_manager.get_config(symbol)
+        action = {"开仓": "open", "平仓": "close"}.get(action, action)
+        return f"{symbol}:{action}" if getattr(getattr(cfg, "quantity_config", None), "quantity_mode", "fixed") == "value" else symbol
+
+    def record_price_sample(self, symbol: str, spread_data, *, action="open") -> None:
+        key = self._history_key(symbol, action)
+        history = self._price_history.setdefault(key, deque())
         timestamp = time.time()
         history.append(
             (timestamp, spread_data.price_buy, spread_data.price_sell))
@@ -89,8 +95,8 @@ class RiskControlUtils:
         while history and history[0][0] < cutoff:
             history.popleft()
 
-    def reset_price_history(self, symbol: str, spread_data) -> None:
-        history = self._price_history.setdefault(symbol, deque())
+    def reset_price_history(self, symbol: str, spread_data, *, action="open") -> None:
+        history = self._price_history.setdefault(self._history_key(symbol, action), deque())
         history.clear()
         history.append(
             (time.time(), spread_data.price_buy, spread_data.price_sell))
@@ -112,7 +118,7 @@ class RiskControlUtils:
             return True
 
         now = time.time()
-        history = self._price_history.get(symbol)
+        history = self._price_history.get(self._history_key(symbol, action))
         if not history:
             self._log_price_stability_state(
                 symbol,
@@ -162,7 +168,7 @@ class RiskControlUtils:
                 level="warning",
                 throttle_seconds=self._throttle_cfg["price_stability_volatile"],
             )
-            self.reset_price_history(symbol, spread_data)
+            self.reset_price_history(symbol, spread_data, action=action)
             return False
 
         prev_state = self._price_stability_state.get(f"{symbol}:{action}")
@@ -445,6 +451,7 @@ class RiskControlUtils:
 
         # 读取配置：聚合档位数（默认 1）
         agg_levels = 1
+        cfg = None
         try:
             cfg = self.orc.config_manager.get_config(trading_pair_id)
             raw = getattr(getattr(cfg, "grid_config", None), "orderbook_aggregate_levels", 1)
@@ -460,11 +467,17 @@ class RiskControlUtils:
         # 🔥 多档聚合：用前 N 档计算可用数量与 VWAP（若订单簿没有多档/没有数量，则自动降级）
         from .orderbook_aggregation import aggregate_top_n_vwap
 
+        price_limit = None
+        if cfg and getattr(cfg.grid_config, "basis_config", {}).get("enabled", False):
+            slip = Decimal(str(cfg.grid_config.slippage_tolerance or 0))
+            best = orderbook.best_ask if is_buy else orderbook.best_bid
+            price_limit = best.price * (1 + slip if is_buy else 1 - slip)
         agg = aggregate_top_n_vwap(
             orderbook,
             is_buy=is_buy,
             max_levels=agg_levels,
             target_qty=required,
+            price_limit=price_limit,
         )
 
         # 无法获得数量 -> 跳过校验（保持原语义）

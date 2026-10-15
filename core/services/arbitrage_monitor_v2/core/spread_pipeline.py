@@ -12,6 +12,7 @@ Spread Pipeline
 import asyncio
 import logging
 import time
+import math
 from decimal import Decimal
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Set
 
@@ -372,7 +373,9 @@ class SpreadPipeline:
             max_age_seconds=orc.get_data_freshness_seconds(exchange_b),
         )
         if not orderbook_a or not orderbook_b:
+            orc.decision_engine.observe_basis(symbol_key, {})
             return
+        orc.decision_engine.observe_basis(symbol_key, {exchange_a: orderbook_a, exchange_b: orderbook_b})
 
         try:
             ts_a = self._get_orderbook_ts(orderbook_a)
@@ -525,11 +528,11 @@ class SpreadPipeline:
                     return
 
             positive_spreads = [
-                s for s in filtered_spreads if s.spread_pct > 0]
+                s for s in filtered_spreads if orc.decision_engine.adjusted_open_spread(symbol_key, s) > 0]
             opening_spread = (
-                max(positive_spreads, key=lambda s: s.spread_pct)
+                max(positive_spreads, key=lambda s: orc.decision_engine.adjusted_open_spread(symbol_key, s))
                 if positive_spreads
-                else max(filtered_spreads, key=lambda s: s.spread_pct)
+                else max(filtered_spreads, key=lambda s: orc.decision_engine.adjusted_open_spread(symbol_key, s))
             )
 
             closing_spread = orc.spread_calculator.build_closing_spread_from_orderbooks(
@@ -549,7 +552,7 @@ class SpreadPipeline:
         if (
             not has_position
             and pair.min_spread_pct is not None
-            and opening_spread.spread_pct < pair.min_spread_pct
+            and orc.decision_engine.adjusted_open_spread(symbol_key, opening_spread) < pair.min_spread_pct
         ):
             return
 
@@ -567,7 +570,7 @@ class SpreadPipeline:
         )
         # 🔥 有持仓时必须检查开仓（即使价差为负），因为可能触发反向平仓检测
         # 无持仓时只检查正价差
-        if (not skip_open_due_to_missing_config) and (has_position or opening_spread.spread_pct > 0):
+        if (not skip_open_due_to_missing_config) and (has_position or orc.decision_engine.adjusted_open_spread(symbol_key, opening_spread) > 0):
             await orc._check_and_open(
                 symbol_key,
                 opening_spread,
@@ -749,26 +752,35 @@ class SpreadPipeline:
         """从 orchestrator 复用资金费率获取实现。"""
         orc = self.orchestrator
         try:
-            funding_rates = orc.data_processor.get_latest_funding_rates()
-            if symbol not in funding_rates:
-                return None
-
-            symbol_funding = funding_rates[symbol]
-            funding_buy = symbol_funding.get(exchange_buy, 0.0)
-            funding_sell = symbol_funding.get(exchange_sell, 0.0)
-            funding_diff = abs(funding_sell - funding_buy)
-            is_favorable = funding_sell > funding_buy
-            funding_diff_annual = abs(funding_sell * 24 - funding_buy * 24) * 365
-
+            values = []
+            for exchange in (exchange_buy, exchange_sell):
+                ticker = orc.data_processor.get_ticker(exchange, symbol)
+                stamp = getattr(ticker, "timestamp", None)
+                rate = getattr(ticker, "funding_rate", None)
+                if stamp is None or rate is None or not math.isfinite(float(rate)):
+                    return None
+                age = time.time() - stamp.timestamp()
+                funding_cfg = orc.config_manager.get_config(symbol).grid_config.basis_config
+                if age < -1 or age > float(funding_cfg.get("funding_max_age_seconds", 60)):
+                    return None
+                if exchange.lower() == "arcus":
+                    raw = getattr(ticker, "raw_data", None) or {}
+                    if "fundingRate" not in raw or not math.isfinite(float(raw["fundingRate"])):
+                        return None
+                    next_at = raw.get("nextFundingAt")
+                    if next_at is not None:
+                        from datetime import datetime
+                        expiry = float(next_at) if isinstance(next_at, (int, float)) else datetime.fromisoformat(str(next_at).replace("Z", "+00:00")).timestamp()
+                        if expiry <= time.time():
+                            return None
+                values.append(float(rate) / 8 * 100)  # Adapter contract: 8-hour decimal; decisions: hourly percent.
+            buy, sell = values
             return FundingRateData(
-                exchange_buy=exchange_buy,
-                exchange_sell=exchange_sell,
-                funding_rate_buy=funding_buy,
-                funding_rate_sell=funding_sell,
-                funding_rate_diff=funding_diff,
-                funding_rate_diff_annual=funding_diff_annual,
-                is_favorable_for_position=is_favorable,
+                exchange_buy=exchange_buy, exchange_sell=exchange_sell,
+                funding_rate_buy=buy, funding_rate_sell=sell,
+                funding_rate_diff=abs(sell - buy),
+                funding_rate_diff_annual=abs(sell - buy) * 24 * 365,
+                is_favorable_for_position=sell >= buy,
             )
-        except Exception as exc:
-            logger.debug(f"[统一调度] 获取资金费率失败: {symbol}: {exc}")
+        except (ValueError, TypeError, AttributeError, OverflowError):
             return None

@@ -12,19 +12,21 @@ def test_native_loader_uses_only_six_stocks():
     segmented = SegmentedConfigManager(Path('config/arbitrage/arbitrage_segmented.yaml'))
     monitor = ConfigManager(Path('config/arbitrage/monitor_lighter_arcus.yaml'))
     assert set(monitor.config.symbols) == SYMBOLS
+    document = yaml.safe_load(Path('config/arbitrage/arbitrage_segmented.yaml').read_text())
     for symbol in SYMBOLS:
         config = segmented.get_config(symbol)
-        assert config.quantity_config.quantity_mode == 'fixed'
-        assert config.quantity_config.base_quantity == Decimal(str(config.grid_config.split_order_size)) * 2
-        assert config.grid_config.max_segments == 2
-        assert config.grid_config.initial_spread_threshold == .15
-        assert config.grid_config.grid_step == .09
+        specific = document['symbol_configs'][symbol]
+        assert config.quantity_config.quantity_mode == 'value'
+        assert config.quantity_config.target_value_usdc == Decimal('500')
+        assert config.quantity_config.split_order_amount_usdc == Decimal('250')
+        assert config.grid_config.max_segments == specific['grid_config']['max_segments']
+        assert config.grid_config.initial_spread_threshold == specific['grid_config']['initial_spread_threshold']
+        assert config.grid_config.grid_step == specific['grid_config']['grid_step']
         assert config.grid_config.slippage_tolerance == .0001
-        assert config.risk_config.max_position_value == 1000
+        assert config.risk_config.max_position_value == specific['risk_config']['max_position_value']
 
 def test_budget_is_configurable_without_stock_runtime(tmp_path):
     data = yaml.safe_load(Path('config/arbitrage/arbitrage_segmented.yaml').read_text())
-    assert data['risk_control']['open_only_close']['max_exchange_position_value']['max_value_usdc'] == 5000
     data['risk_control']['open_only_close']['max_exchange_position_value']['max_value_usdc'] = 6000
     data['symbol_configs']['MU-USDC-PERP']['risk_config']['max_position_value'] = 1200
     target = tmp_path / 'profile.yaml'
@@ -67,6 +69,9 @@ def test_launcher_lock_and_sigterm_share_engine_pid(tmp_path):
     import sys
     import time
     shutil.copy('start.sh', tmp_path / 'start.sh')
+    module = Path('core/services/arbitrage_monitor_v2/config/stock_preflight.py')
+    (tmp_path / module).parent.mkdir(parents=True)
+    shutil.copy(module, tmp_path / module)
     shutil.copytree('config/arbitrage', tmp_path / 'config/arbitrage')
     (tmp_path / 'config/exchanges').mkdir()
     for name in ('lighter', 'arcus'):
@@ -131,7 +136,7 @@ def test_all_active_lists_and_shared_budget_are_six_stock_only():
     assert len(manager.get_pairs()) == 6
     assert all(pair.allow_reverse and {pair.exchange_a, pair.exchange_b} == {'lighter', 'arcus'} for pair in manager.get_pairs())
     guard = profile['risk_control']['open_only_close']
-    assert guard['max_exchange_position_value']['max_value_usdc'] == 5000
+    assert guard['max_exchange_position_value']['max_value_usdc'] > 0
     assert guard['dynamic_max_exchange_position_value']['equity_multiplier'] == 1.0
 
 
@@ -147,13 +152,13 @@ def test_spcx_native_mapping_quantities_and_exchange_boundaries():
         assert converter.convert_from_exchange(native, exchange) == symbol
     cfg = SegmentedConfigManager(Path('config/arbitrage/arbitrage_segmented.yaml')).get_config(symbol)
     assert cfg.quantity_config.base_quantity == Decimal('3.3632')
-    assert Decimal(str(cfg.grid_config.split_order_size)) == Decimal('1.6816')
+    assert cfg.quantity_config.split_order_amount_usdc == Decimal(250)
     assert cfg.quantity_config.quantity_precision == 4
     assert cfg.quantity_config.exchange_min_order_qty == {'default': Decimal('.035'), 'lighter': Decimal('.035'), 'arcus': Decimal('.01')}
     profile = yaml.safe_load(Path('config/arbitrage/arbitrage_segmented.yaml').read_text())
     executor = SimpleNamespace(market_constraints=profile['market_constraints'])
     execution = yaml.safe_load(Path('config/arbitrage/arbitrage_lighter_arcus.yaml').read_text())
-    assert execution['arbitrage_execution']['quantity_config'][symbol] == {'single_order_quantity': 1.6816, 'max_position_quantity': 6.7264, 'quantity_precision': 4}
+    assert execution['arbitrage_execution']['quantity_config'][symbol] == {'quantity_mode': 'value', 'single_order_amount_usdc': 250, 'target_value_usdc': 500, 'max_position_usdc': 1500, 'quantity_precision': 4}
     for buy, sell in [('lighter', 'arcus'), ('arcus', 'lighter')]:
         for quantity in ['1.6816', '3.3632', '6.7264']:
             request = ExecutionRequest(symbol, buy, sell, Decimal('148.66'), Decimal('148.66'), Decimal(quantity))

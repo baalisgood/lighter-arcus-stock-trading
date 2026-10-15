@@ -154,6 +154,8 @@ class UnifiedOrchestratorExecutionUtilsMixin:
             return fallback if self.monitor_only_mode else Decimal("0")
 
     async def _validate_segmented_open(self, request):
+        if request.symbol in getattr(self.decision_engine, "close_blocked_reasons", {}):
+            return False, self.decision_engine.close_blocked_reasons[request.symbol]
         if request.symbol in getattr(self, "_position_risk_close_reasons", {}):
             return False, "该套利对风控退出中或失败锁存"
         if self._bootstrap_positions_block_open:
@@ -198,8 +200,32 @@ class UnifiedOrchestratorExecutionUtilsMixin:
             threshold = request.grid_threshold_pct
             if threshold is None:
                 threshold = Decimal(str(self.config_manager.get_config(request.symbol).grid_config.initial_spread_threshold))
-            if Decimal(str(self.decision_engine._calculate_net_spread(view))) < Decimal(str(threshold)):
+            cfg = self.decision_engine._config(request.symbol)
+            if cfg.quantity_config.quantity_mode == "value":
+                try:
+                    view = self._protected_spread_view(request.symbol, view, request.quantity)
+                except ValueError:
+                    return False, "账户读取后受保护深度不足"
+            decision_spread = self.decision_engine.adjusted_open_spread(request.symbol, view) - self.decision_engine._round_trip_fee_pct(view)
+            if cfg.grid_config.basis_config.get("enabled", False) and not self.decision_engine.basis_ready(request.symbol):
+                return False, "账户读取后基差尚未就绪"
+            if cfg.grid_config.basis_config.get("funding_budget_enabled", False) and cfg.risk_config.enable_funding_rate_risk:
+                funding = self._get_funding_rate_data(request.buy_symbol or request.symbol, request.exchange_buy, request.exchange_sell)
+                if funding is None:
+                    return False, "账户读取后资金费率不可用"
+                funding_cost = self.decision_engine.expected_funding_cost(request.symbol, funding)
+                if funding_cost is None:
+                    return False, "账户读取后资金费参数无效"
+                decision_spread -= funding_cost
+            # Refresh session threshold after potentially slow account reads.
+            if cfg.grid_config.stock_session:
+                threshold = Decimal(str(self.decision_engine._calculate_open_threshold(request.symbol, request.grid_level or 1, cfg)))
+            if Decimal(str(decision_spread)) < Decimal(str(threshold)):
                 return False, "账户读取后净价差低于本格阈值"
+            if cfg.quantity_config.quantity_mode == "value":
+                protected_price = max(buy, sell, request.price_buy, request.price_sell) * (1 + Decimal(str(request.slippage_tolerance_pct or 0)))
+                if request.quantity * protected_price > cfg.quantity_config.split_order_amount_usdc:
+                    return False, "账户读取后单笔金额超过配置上限"
             # Reconcile confirmed fills against both account projections; never add them twice.
             actual, confirmed, leg_symbols = {}, {}, {}
             normalize = self._normalize_symbol_for_comparison
@@ -302,7 +328,15 @@ class UnifiedOrchestratorExecutionUtilsMixin:
                     request.price_sell = live_price
             if not request.allow_when_global_paused:
                 from dataclasses import replace
-                exit_view = replace(request.spread_data, price_buy=request.price_buy, price_sell=request.price_sell)
+                exit_view = replace(request.spread_data, price_buy=request.price_buy, price_sell=request.price_sell,
+                                    spread_abs=request.price_sell - request.price_buy,
+                                    spread_pct=float((request.price_sell - request.price_buy) / request.price_buy * 100))
+                cfg = self.decision_engine._config(request.symbol)
+                if cfg.quantity_config.quantity_mode == "value":
+                    exit_view = self._protected_spread_view(request.symbol, exit_view, request.quantity)
+                    allowed, quantity, _, _ = await self.decision_engine.should_close(request.symbol, exit_view, skip_persistence=True)
+                    if not allowed or quantity < request.quantity:
+                        return False, "账户读取后受保护价差不满足当前平仓阈值或数量"
                 profit = self._estimate_fifo_close_profit(position, request.quantity, exit_view)
                 if profit is None or profit < 0:
                     return False, "正常平仓净收益不足或入场成本缺失"

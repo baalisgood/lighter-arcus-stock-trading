@@ -67,12 +67,65 @@ from .unified_orchestrator_logging import logger
 class UnifiedOrchestratorGatesMixin:
     """由 unified_orchestrator.py 拆分出的 mixin。"""
 
+    def _protected_spread_view(self, symbol, spread, quantity):
+        """Fresh executable VWAP for one exact order; never mutates the caller's quote."""
+        from dataclasses import replace
+        from ..utils.orderbook_aggregation import aggregate_top_n_vwap
+        cfg = self.decision_engine._config(symbol)
+        if cfg.quantity_config.quantity_mode != "value":
+            return spread
+        if quantity <= 0:
+            raise ValueError("No executable quantity")
+        values = []
+        for exchange, leg_symbol, is_buy in ((spread.exchange_buy, spread.buy_symbol or symbol, True), (spread.exchange_sell, spread.sell_symbol or symbol, False)):
+            book = self.data_processor.get_orderbook(exchange, leg_symbol, max_age_seconds=self.get_data_freshness_seconds(exchange))
+            best = (book.best_ask if is_buy else book.best_bid) if book else None
+            if best is None:
+                raise ValueError("Fresh protected book unavailable")
+            slip = Decimal(str(cfg.grid_config.slippage_tolerance or 0))
+            limit = best.price * (1 + slip if is_buy else 1 - slip)
+            aggregate = aggregate_top_n_vwap(book, is_buy=is_buy, max_levels=cfg.grid_config.orderbook_aggregate_levels, target_qty=quantity, price_limit=limit)
+            if not aggregate.fully_covered or aggregate.vwap_price is None:
+                raise ValueError("Insufficient protected depth")
+            values.append(aggregate)
+        buy, sell = values
+        return replace(spread, price_buy=buy.vwap_price, price_sell=sell.vwap_price,
+                       size_buy=buy.total_available, size_sell=sell.total_available,
+                       spread_abs=sell.vwap_price - buy.vwap_price,
+                       spread_pct=float((sell.vwap_price - buy.vwap_price) / buy.vwap_price * 100))
+
+    def _prepare_stock_signal(self, symbol, spread, funding, *, is_open):
+        cfg = self.decision_engine._config(symbol)
+        if cfg.quantity_config.quantity_mode != "value":
+            return spread
+        engine = self.decision_engine
+        view = spread
+        for _ in range(cfg.grid_config.max_segments + 2):
+            qty = engine.preview_order_quantity(symbol, view, funding, is_open=is_open)
+            if qty <= 0:
+                # Still observe executable convergence at one prospective close order.
+                if is_open:
+                    engine._reset_spread_persistence(engine._build_persistence_key(symbol, spread))
+                    return None
+                actual = engine._get_actual_position(symbol)
+                price = max(spread.price_buy, spread.price_sell)
+                qty = min(actual, cfg.quantity_config.split_order_amount_usdc / price)
+                qty = engine._format_quantity(qty, cfg.quantity_config.quantity_precision)
+                if qty <= 0:
+                    return None
+            candidate = self._protected_spread_view(symbol, spread, qty)
+            next_qty = engine.preview_order_quantity(symbol, candidate, funding, is_open=is_open)
+            view = candidate
+            if next_qty == qty or next_qty <= 0:
+                return view
+        raise ValueError("Executable signal quantity did not converge")
+
     def _should_enforce_orderbook_liquidity(self, symbol: str) -> bool:
         """
         判断是否需要对该symbol启用对手盘深度校验
         """
         try:
-            config = self.config_manager.get_config(symbol)
+            config = self.decision_engine._config(symbol)
             return bool(
                 getattr(config.grid_config,
                         'require_orderbook_liquidity', False)
@@ -85,7 +138,7 @@ class UnifiedOrchestratorGatesMixin:
         获取配置的盘口最小可用数量门槛
         """
         try:
-            config = self.config_manager.get_config(symbol)
+            config = self.decision_engine._config(symbol)
             min_qty = getattr(config.grid_config,
                               'min_orderbook_quantity', None)
             if min_qty is None:
@@ -104,7 +157,7 @@ class UnifiedOrchestratorGatesMixin:
         - 不支持多档/无数量的交易所会在下游自动降级
         """
         try:
-            config = self.config_manager.get_config(symbol)
+            config = self.decision_engine._config(symbol)
             raw = getattr(config.grid_config, "orderbook_aggregate_levels", 1)
             n = int(raw) if raw is not None else 1
             return max(1, n)
@@ -118,7 +171,7 @@ class UnifiedOrchestratorGatesMixin:
         if not symbol:
             return None
         try:
-            config = self.config_manager.get_config(symbol)
+            config = self.decision_engine._config(symbol)
         except Exception:
             return None
         raw_offset = getattr(config.grid_config, 'limit_price_offset', None)
@@ -148,7 +201,7 @@ class UnifiedOrchestratorGatesMixin:
         if not symbol or not grid_level or grid_level <= 0:
             return None
         try:
-            config = self.config_manager.get_config(symbol)
+            config = self.decision_engine._config(symbol)
         except Exception:
             return None
         grid_cfg = getattr(config, "grid_config", None)
@@ -194,11 +247,11 @@ class UnifiedOrchestratorGatesMixin:
         if actual_position is None:
             return None
         try:
-            cfg = self.config_manager.get_config(symbol)
+            cfg = self.decision_engine._config(symbol)
         except Exception:
             return None
         try:
-            th = float(self.decision_engine._get_close_persistence_threshold(actual_position, cfg))  # type: ignore[attr-defined]
+            th = float(self.decision_engine._get_close_persistence_threshold(actual_position, cfg, symbol))  # type: ignore[attr-defined]
         except Exception:
             return None
         if th <= 0:
@@ -240,8 +293,8 @@ class UnifiedOrchestratorGatesMixin:
             )
             return None
 
-    def _record_price_sample(self, symbol: str, spread_data: SpreadData) -> None:
-        self.risk_utils.record_price_sample(symbol, spread_data)
+    def _record_price_sample(self, symbol: str, spread_data: SpreadData, *, action="open") -> None:
+        self.risk_utils.record_price_sample(symbol, spread_data, action=action)
 
     def _reset_price_history(self, symbol: str, spread_data: SpreadData) -> None:
         self.risk_utils.reset_price_history(symbol, spread_data)
@@ -477,7 +530,7 @@ class UnifiedOrchestratorGatesMixin:
     ):
         """在实际下单前输出持续性检查结果，帮助验证严格/宽松模式"""
         try:
-            config = self.config_manager.get_config(symbol)
+            config = self.decision_engine._config(symbol)
         except Exception:
             return
 

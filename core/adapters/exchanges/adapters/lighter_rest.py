@@ -1668,8 +1668,22 @@ class LighterRest(LighterBase):
         else:
             quantize_precision = Decimal(10) ** (-price_decimals)
 
-        avg_execution_price_rounded = avg_execution_price.quantize(
-            quantize_precision)
+        bound = kwargs.get("price_bound")
+        if bound is not None:
+            from decimal import ROUND_CEILING, ROUND_FLOOR
+            bound = Decimal(str(bound))
+            if not bound.is_finite() or bound <= 0:
+                raise ValueError("Invalid stock price bound")
+            avg_execution_price = min(avg_execution_price, bound) if side.lower() == "buy" else max(avg_execution_price, bound)
+            avg_execution_price_rounded = avg_execution_price.quantize(quantize_precision, rounding=ROUND_FLOOR if side.lower() == "buy" else ROUND_CEILING)
+            cap = kwargs.get("max_order_notional_usdc")
+            if cap is not None:
+                cap = Decimal(str(cap)); reference = Decimal(str(kwargs.get("reference_price", avg_execution_price)))
+                value_price = max(reference, avg_execution_price_rounded) if side.lower() == "buy" else reference
+                if not cap.is_finite() or cap <= 0 or not reference.is_finite() or reference <= 0 or quantity * value_price > cap:
+                    raise ValueError("Stock order exceeds protected reference notional")
+        else:
+            avg_execution_price_rounded = avg_execution_price.quantize(quantize_precision)
 
         quantity_multiplier_exponent = max(0, 6 - price_decimals)
         quantity_multiplier = Decimal(10) ** quantity_multiplier_exponent
@@ -1874,7 +1888,10 @@ class LighterRest(LighterBase):
         reduce_only: bool = False,
         slippage_multiplier: Decimal = Decimal("1.0"),
         client_order_id: Optional[int] = None,
-        target_price: Optional[Decimal] = None
+        target_price: Optional[Decimal] = None,
+        price_bound: Optional[Decimal] = None,
+        max_order_notional_usdc: Optional[Decimal] = None,
+        reference_price: Optional[Decimal] = None,
     ) -> Optional[Dict[str, Any]]:
         """构建市价单的签名交易数据，不立即发送"""
         if not self.signer_client:
@@ -1911,6 +1928,9 @@ class LighterRest(LighterBase):
             side,
             reduce_only=reduce_only,
             client_order_id=client_order_id,
+            price_bound=price_bound,
+            max_order_notional_usdc=max_order_notional_usdc,
+            reference_price=reference_price,
         )
 
         # 🔥 修复：只有在所有前置条件都满足后，才获取nonce
@@ -2054,7 +2074,10 @@ class LighterRest(LighterBase):
                     reduce_only=reduce_only,
                     slippage_multiplier=slippage_multiplier,
                     client_order_id=order.get("client_order_id"),
-                    target_price=target_price
+                    target_price=target_price,
+                    price_bound=order.get("price_bound"),
+                    max_order_notional_usdc=order.get("max_order_notional_usdc"),
+                    reference_price=order.get("reference_price"),
                 )
                 if not signed:
                     # 🔥 关键：签名失败，需要回滚所有已获取的nonce

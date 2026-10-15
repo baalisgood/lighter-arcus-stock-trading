@@ -598,14 +598,15 @@ def test_dual_cancel_stale_fill_preserves_cumulative_and_valuation(stale_fill):
 
 
 
-@pytest.mark.parametrize('total,paused,critical',[('60',False,False),('50',False,False),('49.99',True,False),('39.99',True,True)])
-def test_live_balance_thresholds_use_total_not_free(total,paused,critical):
+@pytest.mark.parametrize('boundary,paused,critical',[('above',False,False),('warning',False,False),('below_warning',True,False),('below_close',True,True)])
+def test_live_balance_thresholds_use_total_not_free(boundary,paused,critical):
     from core.adapters.exchanges.models import BalanceData
     from core.services.arbitrage_monitor_v2.config.unified_config_manager import UnifiedConfigManager
     from core.services.arbitrage_monitor_v2.risk_control.global_risk_controller import GlobalRiskController
     cfg=UnifiedConfigManager(Path('config/arbitrage/arbitrage_lighter_arcus.yaml')).get_unified_config()
-    assert cfg.risk_control.balance_management.min_balance_warning==50
-    assert cfg.risk_control.balance_management.min_balance_close_position==40
+    warning = D(str(cfg.risk_control.balance_management.min_balance_warning))
+    close = D(str(cfg.risk_control.balance_management.min_balance_close_position))
+    total = {'above': warning + 1, 'warning': warning, 'below_warning': warning - D('.01'), 'below_close': close - D('.01')}[boundary]
     balance=BalanceData('USDC',D('0'),D(total),D(total),D(total),datetime.now(),{})
     adapters={name:SimpleNamespace(get_balances=AsyncMock(return_value=[balance]),get_positions=AsyncMock(return_value=[])) for name in ('lighter','arcus')}
     risk=GlobalRiskController(cfg.risk_control,adapters)
@@ -703,3 +704,28 @@ def test_strict_rest_terminal_consumes_all_submit_aliases_before_late_ws(monkeyp
         reporter.assert_not_called()
         assert e._order_fill_results['real-id'].filled == 1
     run(scenario())
+
+
+@pytest.mark.parametrize('side,bound,expected',[(OrderSide.BUY,'50000.05','50000.0'),(OrderSide.SELL,'49999.95','50000.0')])
+def test_stock_market_payload_respects_reference_bound_and_tick(side,bound,expected):
+    a=adapter();calls=[]
+    async def request(method,path,**kwargs):
+        if 'l2OrderBook' in path:return 200,{'bids':[['49990','1']],'asks':[['50010','1']]}
+        calls.append(kwargs.get('body'))
+        raise ArcusRequestRejectedError('synthetic definitive rejection')
+    a._request=request
+    with pytest.raises(ArcusRequestRejectedError):
+        run(a.create_order(SYMBOL,side,OrderType.MARKET,D('.001'),params={'price_bound':D(bound),'max_order_notional_usdc':D(250),'reference_price':D(50000),'slippage_tolerance_pct':D('.0001')}))
+    body=calls[0];assert body['price']==expected and D(body['quantity'])==D('.001')
+    assert D(body['price'])<=D(bound) if side==OrderSide.BUY else D(body['price'])>=D(bound)
+
+
+def test_stock_market_reference_budget_rejects_before_post():
+    a=adapter();posts=[]
+    async def request(method,path,**kwargs):
+        if 'l2OrderBook' in path:return 200,{'bids':[['49999','1']],'asks':[['50000','1']]}
+        posts.append(path);raise AssertionError('must reject before POST')
+    a._request=request
+    with pytest.raises(ValueError,match='notional'):
+        run(a.create_order(SYMBOL,OrderSide.BUY,OrderType.MARKET,D('.01'),params={'price_bound':D(50001),'reference_price':D(50000),'max_order_notional_usdc':D(250)}))
+    assert posts==[]

@@ -29,8 +29,16 @@ for name in profiles:
     if not isinstance(value, dict):
         raise SystemExit('Invalid profile: ' + name)
     loaded[name] = value
+sys.path.insert(0, str(root))
+import importlib.util
+spec = importlib.util.spec_from_file_location("stock_preflight", root / "core/services/arbitrage_monitor_v2/config/stock_preflight.py")
+preflight = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(preflight)
+validate_stock_profiles = preflight.validate_stock_profiles
+validate_stock_profiles(root / 'config/arbitrage/arbitrage_segmented.yaml',
+                        root / 'config/arbitrage/arbitrage_lighter_arcus.yaml')
 if mode == 'check':
-    print('Local YAML syntax OK; no account or network checks performed.')
+    print('Local stock profiles and decision/execution parity OK; no account or network checks performed.')
     raise SystemExit(0)
 for exchange in ('lighter', 'arcus'):
     if not (root / 'config/exchanges' / (exchange + '_config.yaml')).is_file():

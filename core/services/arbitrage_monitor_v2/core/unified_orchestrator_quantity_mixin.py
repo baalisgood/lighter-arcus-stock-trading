@@ -118,6 +118,13 @@ class UnifiedOrchestratorQuantityMixin:
             quantity_config
         ) -> Decimal:
             """计算单段应持有的目标数量"""
+            if getattr(quantity_config, "quantity_mode", "fixed") == "value":
+                position = self.decision_engine.get_position(symbol)
+                occupied = self.decision_engine.remaining_entry_notional(symbol)
+                if not position or occupied is None:
+                    return Decimal("0")
+                target = max(Decimal("0"), occupied - quantity_config.target_value_usdc)
+                return position.total_quantity - self.decision_engine._quantity_after_fifo_close(symbol, target)
             base_quantity = Decimal(str(quantity_config.base_quantity or 0))
             ratio = Decimal('1')
             target_quantity = base_quantity * ratio
