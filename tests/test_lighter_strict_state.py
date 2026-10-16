@@ -939,3 +939,133 @@ def test_direct_book_waits_for_snapshot_and_preserves_untouched_depth():
         await dispatch('subscribed', {'bids':[], 'asks':[['101','1']]})
         assert 1 in ws._local_orderbooks and not ws._local_orderbooks[1]['bids']
     run(scenario())
+
+
+@pytest.fixture
+def keepalive_ws():
+    from core.adapters.exchanges.adapters.lighter_websocket import LighterWebSocket
+    client = object.__new__(LighterWebSocket)
+    client._running = True
+    client._direct_ws = SimpleNamespace(send=AsyncMock(), close=AsyncMock())
+    client._network_bytes_sent = 7
+    client._last_message_time = 123
+    client._last_business_message_time = 100
+    client._heartbeat_task = None
+    client._data_timeout_task = None
+    client._direct_ws_task = None
+    client._subscribed_market_stats = set()
+    client._subscribed_markets = set()
+    client._local_orderbooks = {}
+    client._close_signer_client = AsyncMock()
+    return client
+
+
+def test_client_keepalive_default_interval_payload_bytes_and_freshness(keepalive_ws, monkeypatch):
+    import json
+    client = keepalive_ws
+    sleep = AsyncMock()
+    monkeypatch.setattr(asyncio, 'sleep', sleep)
+    async def send(message):
+        assert json.loads(message) == {'type':'pong'}
+        assert client._network_bytes_sent == 7
+        client._running = False
+    client._direct_ws.send.side_effect = send
+    run(client._client_keepalive_loop(client._direct_ws))
+    sleep.assert_awaited_once_with(30.0)
+    message = client._direct_ws.send.call_args.args[0]
+    assert client._network_bytes_sent == 7 + len(message.encode('utf-8'))
+    assert (client._last_message_time, client._last_business_message_time) == (123, 100)
+
+
+@pytest.mark.parametrize('when', ['before_sleep', 'during_sleep'])
+def test_client_keepalive_does_not_send_to_replaced_connection(keepalive_ws, monkeypatch, when):
+    client = keepalive_ws
+    old = client._direct_ws
+    async def sleep(interval):
+        client._direct_ws = object()
+    monkeypatch.setattr(asyncio, 'sleep', AsyncMock(side_effect=sleep))
+    if when == 'before_sleep': client._direct_ws = object()
+    run(client._client_keepalive_loop(old))
+    old.send.assert_not_awaited()
+    assert client._network_bytes_sent == 7
+    assert (client._last_message_time, client._last_business_message_time) == (123, 100)
+
+
+def test_client_keepalive_send_failure_warns_without_counting_or_freshening(keepalive_ws, monkeypatch):
+    from core.adapters.exchanges.adapters import lighter_websocket as module
+    client = keepalive_ws
+    monkeypatch.setattr(asyncio, 'sleep', AsyncMock())
+    logger = Mock()
+    monkeypatch.setattr(module, 'logger', logger)
+    client._direct_ws.send.side_effect = RuntimeError('offline send failed')
+    run(client._client_keepalive_loop(client._direct_ws))
+    client._direct_ws.send.assert_awaited_once()
+    logger.warning.assert_called_once_with('⚠️ [Lighter] 客户端保活发送失败: offline send failed')
+    assert client._network_bytes_sent == 7
+    assert (client._last_message_time, client._last_business_message_time) == (123, 100)
+
+
+@pytest.mark.parametrize('cleanup', ['cancel', '_cleanup_old_connection', 'disconnect'])
+def test_client_keepalive_cancellation_and_existing_lifecycle(keepalive_ws, cleanup):
+    client = keepalive_ws
+    async def scenario():
+        task = asyncio.create_task(client._client_keepalive_loop(client._direct_ws))
+        client._heartbeat_task = task
+        await asyncio.sleep(0)
+        assert not task.done()
+        if cleanup == 'cancel': task.cancel(); await task
+        else: await getattr(client, cleanup)()
+        assert task.done()
+        client._close_signer_client.assert_awaited_once() if cleanup == 'disconnect' else None
+    ws = client._direct_ws
+    run(scenario())
+    ws.send.assert_not_awaited()
+    assert client._network_bytes_sent == 7
+
+
+def test_direct_subscription_starts_keepalive_before_subscribing_and_replaces_on_reconnect(keepalive_ws, monkeypatch):
+    from core.adapters.exchanges.adapters import lighter_websocket as module
+    client = keepalive_ws
+    client.ws_url = 'ws://offline.invalid'
+    client._data_timeout_seconds = 180
+    client._create_auth_token = AsyncMock(return_value=None)
+    client._send_orderbook_subscriptions = AsyncMock()
+    client._send_account_subscriptions = AsyncMock()
+    connections = [SimpleNamespace(send=AsyncMock(), close=AsyncMock()) for _ in range(2)]
+    tasks = []
+    old_tasks = []
+    class Connection:
+        async def __aenter__(self): return connections[len(tasks)]
+        async def __aexit__(self, *exc): pass
+    connect = Mock(side_effect=lambda *args, **kwargs: Connection())
+    monkeypatch.setattr(module.websockets, 'connect', connect)
+    async def monitor(): await asyncio.Event().wait()
+    client._data_timeout_monitor = monitor
+    async def subscribe():
+        task = client._heartbeat_task
+        assert task is not None and not task.done()
+        assert task.get_coro().cr_code is client._client_keepalive_loop.__func__.__code__
+        assert task.get_coro().cr_frame.f_locals['ws'] is client._direct_ws
+        if tasks: assert tasks[-1].done()
+        tasks.append(task)
+    client._send_market_stats_subscriptions = subscribe
+    async def listen(ws):
+        await asyncio.sleep(0)
+        if len(tasks) == 2: client._running = False
+    client._listen_websocket = listen
+    async def scenario():
+        old = asyncio.create_task(monitor())
+        client._heartbeat_task = old
+        old_tasks.append(old)
+        await asyncio.sleep(0)
+        await asyncio.wait_for(client._run_direct_ws_subscription(), timeout=3)
+        assert old.done() and all(task.done() for task in tasks)
+        assert client._data_timeout_task.done()
+        assert client._direct_ws is None
+    run(scenario())
+    assert len(tasks) == connect.call_count == 2 and tasks[0] is not tasks[1]
+    assert client._send_orderbook_subscriptions.await_count == 2
+    client._send_account_subscriptions.assert_not_awaited()
+    for ws in connections:
+        ws.send.assert_not_awaited()
+        ws.close.assert_awaited_once_with(code=1000, reason='Reconnecting')

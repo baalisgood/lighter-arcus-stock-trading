@@ -2243,6 +2243,11 @@ class LighterWebSocket(LighterBase):
                         f"⏱️  [Lighter] 数据超时检测任务已启动 (阈值={self._data_timeout_seconds}s)"
                     )
 
+                    # 客户端保活：Lighter 服务端约120s收不到客户端帧会断开（read i/o timeout）
+                    if self._heartbeat_task and not self._heartbeat_task.done():
+                        self._heartbeat_task.cancel()
+                    self._heartbeat_task = asyncio.create_task(self._client_keepalive_loop(ws))
+
                     # 先订阅market_stats / order_book，再订阅账户频道
                     await self._send_market_stats_subscriptions()
                     await self._send_orderbook_subscriptions()
@@ -2347,6 +2352,21 @@ class LighterWebSocket(LighterBase):
         except Exception as e:
             logger.error(f"❌ [Lighter重连] 清理旧连接时出错: {e}", exc_info=True)
     
+    async def _client_keepalive_loop(self, ws, interval: float = 30.0):
+        """每 interval 秒向当前连接发 pong，不修改数据活跃时间。"""
+        try:
+            while self._running and self._direct_ws is ws:
+                await asyncio.sleep(interval)
+                if self._direct_ws is not ws:
+                    break
+                msg = json.dumps({'type': 'pong'})
+                await ws.send(msg)
+                self._network_bytes_sent += len(msg.encode('utf-8'))
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.warning(f'⚠️ [Lighter] 客户端保活发送失败: {exc}')
+
     async def _heartbeat_loop(self):
         """
         🚀 主动心跳任务：定期发送 pong 保持连接活跃
