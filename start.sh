@@ -40,9 +40,6 @@ validate_stock_profiles(root / 'config/arbitrage/arbitrage_segmented.yaml',
 if mode == 'check':
     print('Local stock profiles and decision/execution parity OK; no account or network checks performed.')
     raise SystemExit(0)
-for exchange in ('lighter', 'arcus'):
-    if not (root / 'config/exchanges' / (exchange + '_config.yaml')).is_file():
-        raise SystemExit('Missing local authentication config; copy examples/' + exchange + '_config.yaml.example')
 (root / 'run').mkdir(exist_ok=True)
 with (root / 'run/stock.lock').open('a') as lock:
     try:

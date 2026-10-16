@@ -62,7 +62,7 @@ class OrchestratorBootstrap:
                 config_path = Path(f"config/exchanges/{exchange_name}_config.yaml")
                 exchange_config = None
 
-                if config_path.exists():
+                if config_path.exists() or exchange_name in ("lighter", "arcus"):
                     exchange_config = self._load_exchange_config(
                         exchange_name, config_path, config_loader
                     )
@@ -109,6 +109,13 @@ class OrchestratorBootstrap:
         try:
             with open(config_path, "r", encoding="utf-8") as file:
                 config_data = yaml.safe_load(file)
+        except FileNotFoundError as exc:
+            if exchange_name not in ("lighter", "arcus"):
+                logger.warning(
+                    f"⚠️  [{exchange_name}] 配置文件解析失败: {exc}，使用默认配置"
+                )
+                return None
+            config_data = {"extra_params": {"strict_order_state": True}} if exchange_name == "lighter" else {}
         except Exception as exc:
             logger.warning(
                 f"⚠️  [{exchange_name}] 配置文件解析失败: {exc}，使用默认配置"

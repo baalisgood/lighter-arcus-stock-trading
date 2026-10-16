@@ -2,6 +2,7 @@
 from decimal import Decimal
 from pathlib import Path
 import yaml
+import pytest
 from core.services.arbitrage_monitor_v2.config.symbol_config import SegmentedConfigManager
 from core.services.arbitrage_monitor_v2.config.monitor_config import ConfigManager
 from core.services.arbitrage_monitor_v2.config.multi_exchange_config import MultiExchangeArbitrageConfigManager
@@ -62,7 +63,8 @@ def test_empty_template_supports_original_auth_loader_and_adapter(tmp_path, monk
     assert converted['auth_enabled'] is True
     assert converted['strict_order_state'] is True
 
-def test_launcher_lock_and_sigterm_share_engine_pid(tmp_path):
+@pytest.mark.parametrize("mode", ["monitor", "live"])
+def test_launcher_lock_and_sigterm_share_engine_pid(tmp_path, mode):
     import os
     import shutil
     import subprocess
@@ -73,17 +75,19 @@ def test_launcher_lock_and_sigterm_share_engine_pid(tmp_path):
     (tmp_path / module).parent.mkdir(parents=True)
     shutil.copy(module, tmp_path / module)
     shutil.copytree('config/arbitrage', tmp_path / 'config/arbitrage')
-    (tmp_path / 'config/exchanges').mkdir()
-    for name in ('lighter', 'arcus'):
-        (tmp_path / 'config/exchanges' / (name + '_config.yaml')).write_text('{}')
+    (tmp_path / '.env').write_text('LIGHTER_API_KEY_PRIVATE_KEY=synthetic-project-only\n')
     (tmp_path / 'main_unified.py').write_text(
-        'import os,time\nfrom pathlib import Path\n'
+        'import os,time,sys,yaml\nfrom pathlib import Path\n'
+        f'assert yaml.safe_load(Path(sys.argv[2]).read_text())["system_mode"]["monitor_only"] is {mode != "live"}\n'
         'assert "LIGHTER_API_KEY_PRIVATE_KEY" not in os.environ\n'
+        'from dotenv import load_dotenv\n'
+        'load_dotenv(Path(".env"), override=False, interpolate=False)\n'
+        'assert os.environ["LIGHTER_API_KEY_PRIVATE_KEY"] == "synthetic-project-only"\n'
         'Path("pid.txt").write_text(str(os.getpid()))\ntime.sleep(20)\n')
     env = {'PATH': '/usr/bin:/bin', 'STOCK_PYTHON': sys.executable,
            'LIGHTER_API_KEY_PRIVATE_KEY': 'synthetic-not-inherited'}
     def launch():
-        return subprocess.Popen(['bash', 'start.sh', 'monitor'], cwd=tmp_path,
+        return subprocess.Popen(['bash', 'start.sh', mode], cwd=tmp_path,
                                 env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     first = launch()
     try:
@@ -172,3 +176,89 @@ def test_spcx_native_mapping_quantities_and_exchange_boundaries():
             field = 'price_buy' if venue == buy else 'price_sell'
             setattr(request, field, (minimum - Decimal('.01')) / request.quantity)
             with pytest.raises(ValueError): ArbitrageExecutor._validate_pair_quantity(executor, request)
+
+@pytest.mark.parametrize('auth_source', ['env-only', 'template-env', 'yaml-only'])
+def test_project_dotenv_reaches_native_factory_and_adapters(tmp_path, monkeypatch, auth_source):
+    import socket
+    from types import SimpleNamespace
+    from dotenv import load_dotenv
+    from core.adapters.exchanges.adapters import lighter
+    from core.adapters.exchanges.adapters.arcus import ArcusAdapter
+    from core.services.arbitrage_monitor_v2.core.orchestrator_bootstrap import OrchestratorBootstrap
+    values = {
+        'LIGHTER_API_KEY_PRIVATE_KEY': 'synthetic-$-test-only',
+        'LIGHTER_ACCOUNT_INDEX': '7', 'LIGHTER_API_KEY_INDEX': '2',
+        'ARCUS_WALLET_ADDRESS': '0xsynthetic-test-only',
+        'ARCUS_API_KEY': 'synthetic-api-key',
+        'ARCUS_API_SIGNING_KEY': 'synthetic-signing-key', 'ARCUS_ACCOUNT_INDEX': '3',
+    }
+    for key in list(__import__('os').environ):
+        if key.startswith(('LIGHTER_', 'ARCUS_')):
+            monkeypatch.delenv(key)
+    templates = {name: yaml.safe_load(Path(f'examples/{name}_config.yaml.example').read_text())
+                 for name in ('lighter', 'arcus')}
+    monkeypatch.chdir(tmp_path)
+    Path('logs').mkdir()
+    if auth_source != 'env-only':
+        (tmp_path / 'config/exchanges').mkdir(parents=True)
+        if auth_source == 'yaml-only':
+            templates['lighter']['api_config']['auth'].update(
+                api_key_private_key=values['LIGHTER_API_KEY_PRIVATE_KEY'], account_index=7, api_key_index=2)
+            templates['arcus']['arcus']['authentication'].update(
+                wallet_address=values['ARCUS_WALLET_ADDRESS'], api_key=values['ARCUS_API_KEY'],
+                api_signing_key=values['ARCUS_API_SIGNING_KEY'], account_index=3)
+        for name, document in templates.items():
+            Path(f'config/exchanges/{name}_config.yaml').write_text(yaml.safe_dump(document))
+    if auth_source != 'yaml-only':
+        Path('.env').write_text(''.join(f'{key}={value}\n' for key, value in values.items()))
+        # Real dotenv semantics used by main_unified.py; never use a real credential file.
+        for key in values:
+            monkeypatch.setenv(key, '')
+            monkeypatch.delenv(key)
+        load_dotenv(Path('.env'), override=False, interpolate=False)
+    def no_network(*args, **kwargs):
+        raise AssertionError('configuration must not use network')
+    monkeypatch.setattr(socket.socket, 'connect', no_network)
+    # Keep the real factory, adapter constructors and configuration conversion;
+    # replace only Lighter modules that could construct a native signer/transport.
+    def module_stub(config):
+        return SimpleNamespace(base_url='https://synthetic.invalid', ws_url='wss://synthetic.invalid')
+    for name in ('LighterBase', 'LighterRest', 'LighterWebSocket'):
+        monkeypatch.setattr(lighter, name, module_stub)
+    monkeypatch.setattr(lighter.LighterAdapter, '_get_symbol_cache_service', lambda self: None)
+    monkeypatch.setattr(lighter, 'create_subscription_manager', lambda **kwargs: None)
+    orchestrator = SimpleNamespace(monitor_config=SimpleNamespace(exchanges=['lighter', 'arcus']), exchange_adapters={})
+    OrchestratorBootstrap(orchestrator).init_exchange_adapters()
+    assert set(orchestrator.exchange_adapters) == {'lighter', 'arcus'}
+    lighter_adapter = orchestrator.exchange_adapters['lighter']
+    assert isinstance(lighter_adapter, lighter.LighterAdapter)
+    converted = lighter_adapter._config_dict
+    assert converted['api_key_private_key'] == values['LIGHTER_API_KEY_PRIVATE_KEY']
+    assert (converted['account_index'], converted['api_key_index']) == (7, 2)
+    assert converted['auth_enabled'] is True
+    assert lighter_adapter.strict_order_state is True
+    arcus = orchestrator.exchange_adapters['arcus']
+    assert isinstance(arcus, ArcusAdapter)
+    assert arcus.address == values['ARCUS_WALLET_ADDRESS']
+    assert arcus.api_key == values['ARCUS_API_KEY']
+    assert arcus._seed == values['ARCUS_API_SIGNING_KEY']
+    assert arcus.account_index == 3
+
+
+def test_launcher_check_does_not_load_authentication_or_engine(tmp_path):
+    import shutil
+    import subprocess
+    import sys
+    shutil.copy('start.sh', tmp_path / 'start.sh')
+    module = Path('core/services/arbitrage_monitor_v2/config/stock_preflight.py')
+    (tmp_path / module).parent.mkdir(parents=True)
+    shutil.copy(module, tmp_path / module)
+    shutil.copytree('config/arbitrage', tmp_path / 'config/arbitrage')
+    (tmp_path / '.env').mkdir()  # Reading this as dotenv would fail.
+    (tmp_path / 'main_unified.py').write_text('raise AssertionError("engine imported")\n')
+    result = subprocess.run(['bash', 'start.sh', 'check'], cwd=tmp_path,
+                            env={'STOCK_PYTHON': sys.executable, 'PATH': '/usr/bin:/bin'},
+                            capture_output=True, text=True, timeout=5)
+    assert result.returncode == 0, result.stderr
+    assert 'no account or network checks performed' in result.stdout
+    assert not (tmp_path / 'run').exists()

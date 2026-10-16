@@ -10,17 +10,19 @@ Python 3.12 on macOS or Linux:
 python3.12 -m venv .venv
 .venv/bin/pip install -r requirements-lighter-arcus.txt
 bash start.sh check
-mkdir -p config/exchanges
-cp examples/lighter_config.yaml.example config/exchanges/lighter_config.yaml
-cp examples/arcus_config.yaml.example config/exchanges/arcus_config.yaml
-chmod 600 config/exchanges/*_config.yaml
-# Fill empty authentication fields locally with dedicated stock subaccount credentials.
+cp -n .env.example .env
+chmod 600 .env
+# Fill .env locally with dedicated stock subaccount credentials.
 bash start.sh monitor
 # Explicit real trading:
 bash start.sh live
 ```
 
 `check` validates local profiles and decision/execution parity without credentials or network access. The direct `main_unified.py` entry and orchestrator constructor repeat this gate before loading credentials or connecting. Native `monitor` queries accounts but disables order submission. `start_stock_monitor.sh` aliases monitor; `scripts/start_lighter_arcus.sh` defaults to monitor. Set `STOCK_PYTHON` to an absolute interpreter path if needed.
+
+Use the project-local `.env` as the primary authentication configuration: `LIGHTER_API_KEY_PRIVATE_KEY`, `LIGHTER_ACCOUNT_INDEX`, `LIGHTER_API_KEY_INDEX`, `ARCUS_WALLET_ADDRESS`, `ARCUS_API_KEY`, `ARCUS_API_SIGNING_KEY`, and `ARCUS_ACCOUNT_INDEX`. Enter the actual account and API key indices assigned to these credentials; do not assume an account index of `0`.
+
+Authentication YAML is optional. For YAML-only configuration or advanced adapter settings, copy `examples/lighter_config.yaml.example` and `examples/arcus_config.yaml.example` into `config/exchanges/` without the `.example` suffix, protect them with `chmod 600`, and fill their empty fields locally. The existing loader gives environment credentials priority.
 
 The wrapper clears inherited environment credentials, uses this project's local files, refuses symlinked runtime/authentication paths and holds a process lock. Templates contain no credentials. Do not copy the currency process's credentials. Shutdown uses the engine's emergency-close behavior; stopping a process does not guarantee flat accounts.
 
