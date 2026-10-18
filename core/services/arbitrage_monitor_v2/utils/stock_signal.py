@@ -70,7 +70,8 @@ class BasisState:
 
 def cash_threshold(grid, now=None):
     schedule = grid.stock_session
-    if not schedule:
+    # 24x7 markets (crypto) opt out with stock_session.enabled: false.
+    if not schedule or schedule.get("enabled", True) is False:
         return grid.initial_spread_threshold
     local = (now or datetime.now(ZoneInfo("America/New_York"))).astimezone(ZoneInfo("America/New_York"))
     date = local.date().isoformat()

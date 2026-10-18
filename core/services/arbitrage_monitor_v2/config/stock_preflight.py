@@ -63,6 +63,8 @@ def validate_signal_settings(grid):
     if not basis['max_gap_seconds'] < basis['recovery_seconds'] <= basis['reset_after_seconds'] or basis['checkpoint_interval_seconds'] > basis['reset_after_seconds']:
         raise ValueError('Invalid basis recovery/checkpoint intervals')
     schedule = grid['stock_session']
+    if 'enabled' in schedule and not isinstance(schedule['enabled'], bool):
+        raise ValueError('stock_session.enabled must be a boolean')
     positive(schedule['offhours_threshold_pct'], 'offhours threshold')
     years = schedule.get('calendar_valid_years', [])
     if not isinstance(years, list) or not all(isinstance(year, int) and not isinstance(year, bool) and 1 <= year <= 9999 for year in years):

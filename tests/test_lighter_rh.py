@@ -100,7 +100,8 @@ def test_preflight_rejects_unsafe_rh_profiles(tmp_path, mutate):
 
 def test_rh_minimums_cover_both_venues():
     strategy = yaml.safe_load(SEGMENTED.read_text())
-    rh_min = {'MU': D('0.01'), 'SNDK': D('0.01'), 'AMD': D('0.03'), 'NVDA': D('0.04'), 'INTC': D('0.05'), 'SPCX': D('0.04')}
+    rh_min = {'MU': D('0.01'), 'SNDK': D('0.01'), 'AMD': D('0.03'), 'NVDA': D('0.04'), 'INTC': D('0.05'), 'SPCX': D('0.04'),
+              'BTC': D('0.0002'), 'ETH': D('0.005'), 'SOL': D('0.1'), 'HYPE': D('0.1')}
     for name, item in strategy['symbol_configs'].items():
         mins = item['quantity_config']['min_exchange_order_qty']
         base = name.split('-')[0]
@@ -214,3 +215,60 @@ def test_filled_maker_triggers_market_hedge_on_lighter_with_widened_bound():
     assert seen['adapter'] is main and seen['is_buy'] is False and D(str(seen['quantity'])) == D('0.1')
     # Hedge (and its failed-leg retries) may sell down to live*(1-hedge_max_slippage_pct).
     assert seen['bound'] == D('100.05') * (1 - D('0.0005'))
+
+
+# ---------------------------------------------------------------- symbol management / 24x7 markets
+
+def test_crypto_symbols_skip_stock_session_threshold():
+    from zoneinfo import ZoneInfo
+    from core.services.arbitrage_monitor_v2.utils.stock_signal import cash_threshold
+    night = datetime(2026, 10, 17, 22, 0, tzinfo=ZoneInfo('America/New_York'))
+    crypto = SimpleNamespace(initial_spread_threshold=0.05, stock_session={'enabled': False, 'offhours_threshold_pct': 0.18})
+    stock = SimpleNamespace(initial_spread_threshold=0.12, stock_session={'offhours_threshold_pct': 0.18, 'calendar_valid_years': [2026]})
+    assert cash_threshold(crypto, night) == 0.05
+    assert cash_threshold(stock, night) == 0.18
+
+
+def test_rh_profile_has_crypto_pairs_with_common_grid():
+    strategy = yaml.safe_load(SEGMENTED.read_text())
+    for name, precision in (('BTC-USDC-PERP', 5), ('ETH-USDC-PERP', 4), ('SOL-USDC-PERP', 3), ('HYPE-USDC-PERP', 2)):
+        item = strategy['symbol_configs'][name]
+        assert item['grid_config']['stock_session'] == {'enabled': False}
+        assert item['quantity_config']['quantity_precision'] == precision
+
+
+def _manage(tmp_path, monkeypatch):
+    import importlib.util, shutil
+    for name in ('arbitrage_segmented_rh', 'arbitrage_lighter_rh', 'monitor_lighter_rh', 'multi_exchange_arbitrage_rh'):
+        shutil.copy(Path('config/arbitrage') / (name + '.yaml'), tmp_path / (name + '.yaml'))
+    spec = importlib.util.spec_from_file_location('manage_symbols', 'scripts/manage_symbols.py')
+    module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+    monkeypatch.setattr(module, 'PROFILE_DIR', tmp_path)
+    monkeypatch.setattr(module, 'fetch_markets', lambda venue: (_ for _ in ()).throw(AssertionError('network')))
+    return module
+
+
+def test_manage_symbols_add_and_remove_keeps_all_profiles_in_sync(tmp_path, monkeypatch):
+    module = _manage(tmp_path, monkeypatch)
+    module.main(['add', 'XRP', '--precision', '1', '--min-qty', '20', '--price', '2'])
+    load = lambda n: yaml.safe_load((tmp_path / n).read_text())
+    assert 'XRP-USDC-PERP' in load('arbitrage_segmented_rh.yaml')['symbol_configs']
+    assert 'XRP' in load('arbitrage_segmented_rh.yaml')['market_constraints']
+    assert 'XRP-USDC-PERP' in load('arbitrage_lighter_rh.yaml')['arbitrage_execution']['quantity_config']
+    assert 'XRP-USDC-PERP' in load('monitor_lighter_rh.yaml')['symbols']
+    assert 'XRP-USDC-PERP' in load('multi_exchange_arbitrage_rh.yaml')['symbols']
+    validate_stock_profiles(tmp_path / 'arbitrage_segmented_rh.yaml', tmp_path / 'arbitrage_lighter_rh.yaml')
+    module.main(['remove', 'XRP', 'HYPE'])
+    for name in ('XRP-USDC-PERP', 'HYPE-USDC-PERP'):
+        assert name not in load('arbitrage_segmented_rh.yaml')['symbol_configs']
+        assert name not in load('monitor_lighter_rh.yaml')['symbols']
+        assert name not in load('arbitrage_lighter_rh.yaml')['arbitrage_execution']['quantity_config']
+    validate_stock_profiles(tmp_path / 'arbitrage_segmented_rh.yaml', tmp_path / 'arbitrage_lighter_rh.yaml')
+
+
+def test_manage_symbols_rejects_order_below_venue_minimum_without_writing(tmp_path, monkeypatch):
+    module = _manage(tmp_path, monkeypatch)
+    before = (tmp_path / 'arbitrage_segmented_rh.yaml').read_text()
+    with pytest.raises(SystemExit):
+        module.main(['add', 'XRP', '--precision', '0', '--min-qty', '500', '--price', '2'])
+    assert (tmp_path / 'arbitrage_segmented_rh.yaml').read_text() == before

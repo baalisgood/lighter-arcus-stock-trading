@@ -71,6 +71,30 @@ arbitrage_execution:
       target_value_usdc: 500
       single_order_amount_usdc: 250
       max_position_usdc: 1500
+    BTC-USDC-PERP:
+      quantity_precision: 5
+      quantity_mode: value
+      target_value_usdc: 500
+      single_order_amount_usdc: 250
+      max_position_usdc: 1500
+    ETH-USDC-PERP:
+      quantity_precision: 4
+      quantity_mode: value
+      target_value_usdc: 500
+      single_order_amount_usdc: 250
+      max_position_usdc: 1500
+    SOL-USDC-PERP:
+      quantity_precision: 3
+      quantity_mode: value
+      target_value_usdc: 500
+      single_order_amount_usdc: 250
+      max_position_usdc: 1500
+    HYPE-USDC-PERP:
+      quantity_precision: 2
+      quantity_mode: value
+      target_value_usdc: 500
+      single_order_amount_usdc: 250
+      max_position_usdc: 1500
   exchange_order_modes:
     lighter_rh:
       order_mode: limit
