@@ -35,6 +35,8 @@ from typing import Dict, Any, Optional, List, Callable, Set
 from decimal import Decimal
 from datetime import datetime
 from collections import deque
+import heapq
+from operator import itemgetter
 import asyncio
 import logging
 import math
@@ -1274,6 +1276,9 @@ class LighterWebSocket(LighterBase):
             self._local_orderbooks[market_index] = {
                 'bids': {},  # {price: size}
                 'asks': {},  # {price: size}
+                # float 价格缓存，避免每条增量消息都对整本订单簿做 float 转换/全量排序
+                'bid_px': {},  # {price: float(price)}
+                'ask_px': {},  # {price: float(price)}
                 'timestamp': parsed_timestamp,
                 'offset': orderbook_data.get('offset'),
                 'nonce': orderbook_data.get('nonce')
@@ -1295,7 +1300,9 @@ class LighterWebSocket(LighterBase):
                     try:
                         size_float = float(size)
                         if size_float > 0:
+                            price_float = float(price)
                             self._local_orderbooks[market_index]['bids'][str(price)] = str(size)
+                            self._local_orderbooks[market_index]['bid_px'][str(price)] = price_float
                     except (ValueError, TypeError):
                         continue  # 忽略无效的 size 值
             
@@ -1315,7 +1322,9 @@ class LighterWebSocket(LighterBase):
                     try:
                         size_float = float(size)
                         if size_float > 0:
+                            price_float = float(price)
                             self._local_orderbooks[market_index]['asks'][str(price)] = str(size)
+                            self._local_orderbooks[market_index]['ask_px'][str(price)] = price_float
                     except (ValueError, TypeError):
                         continue  # 忽略无效的 size 值
                     
@@ -1358,8 +1367,15 @@ class LighterWebSocket(LighterBase):
                     # size = 0 表示删除该价格档位
                     if size_float == 0:
                         local_book['bids'].pop(price_str, None)
+                        local_book.setdefault('bid_px', {}).pop(price_str, None)
                     elif size_float > 0:
                         # 更新或添加（只保存 size > 0 的条目）
+                        px_cache = local_book.setdefault('bid_px', {})
+                        if price_str not in px_cache:
+                            try:
+                                px_cache[price_str] = float(price_str)
+                            except (ValueError, TypeError):
+                                continue
                         local_book['bids'][price_str] = str(size)
             
             # 处理 asks 更新
@@ -1383,8 +1399,15 @@ class LighterWebSocket(LighterBase):
                     # size = 0 表示删除该价格档位
                     if size_float == 0:
                         local_book['asks'].pop(price_str, None)
+                        local_book.setdefault('ask_px', {}).pop(price_str, None)
                     elif size_float > 0:
                         # 更新或添加（只保存 size > 0 的条目）
+                        px_cache = local_book.setdefault('ask_px', {})
+                        if price_str not in px_cache:
+                            try:
+                                px_cache[price_str] = float(price_str)
+                            except (ValueError, TypeError):
+                                continue
                         local_book['asks'][price_str] = str(size)
             
             # 更新元数据（timestamp/offset/nonce）
@@ -1403,6 +1426,53 @@ class LighterWebSocket(LighterBase):
         except Exception as e:
             logger.error(f"❌ [Lighter] 应用订单簿更新失败 (market_index={market_index}): {e}", exc_info=True)
     
+    # 只向下游输出前 N 档：BTC/ETH 等加密盘口可能有数千档且更新极快，
+    # 每条增量都全量排序+Decimal 转换会把事件循环 CPU 打满（UI/行情冻结）。
+    ORDERBOOK_MAX_LEVELS = 50
+
+    @property
+    def _orderbook_max_levels(self) -> int:
+        value = getattr(self, '_orderbook_max_levels_override', None)
+        try:
+            value = int(value) if value is not None else self.ORDERBOOK_MAX_LEVELS
+        except (TypeError, ValueError):
+            value = self.ORDERBOOK_MAX_LEVELS
+        return max(1, value)
+
+    def _top_levels(self, local_book: Dict[str, Any], side: str, px_key: str,
+                    max_levels: int, best_is_high: bool) -> List[OrderBookLevel]:
+        """取单边最优 max_levels 档（O(n) 选择 + 仅对选中档位做 Decimal 转换）。"""
+        sizes = local_book.get(side) or {}
+        if not sizes:
+            return []
+        px_cache = local_book.get(px_key)
+        if px_cache is None or len(px_cache) != len(sizes):
+            # 兼容旧结构/缓存不一致时重建缓存
+            px_cache = {}
+            for price_str in sizes:
+                try:
+                    px_cache[price_str] = float(price_str)
+                except (ValueError, TypeError):
+                    continue
+            local_book[px_key] = px_cache
+        # 多取少量冗余，防止个别 size 无效被过滤后档位不足
+        pick = max_levels + 5
+        items = px_cache.items()
+        if len(px_cache) <= pick:
+            chosen = sorted(items, key=itemgetter(1), reverse=best_is_high)
+        elif best_is_high:
+            chosen = heapq.nlargest(pick, items, key=itemgetter(1))
+        else:
+            chosen = heapq.nsmallest(pick, items, key=itemgetter(1))
+        levels: List[OrderBookLevel] = []
+        for price_str, _ in chosen:
+            size_decimal = self._safe_decimal(sizes.get(price_str))
+            if size_decimal and size_decimal > 0:
+                levels.append(OrderBookLevel(price=self._safe_decimal(price_str), size=size_decimal))
+                if len(levels) >= max_levels:
+                    break
+        return levels
+
     def _build_orderbook_from_local(self, symbol: str, market_index: int) -> Optional[OrderBookData]:
         """
         从本地订单簿状态构建 OrderBookData（参考 test_sol_orderbook.py）
@@ -1419,33 +1489,10 @@ class LighterWebSocket(LighterBase):
                 return None
             
             local_book = self._local_orderbooks[market_index]
-            bids = []
-            asks = []
-            
-            # 构建 bids（从高到低排序，过滤掉 size=0 的条目）
-            if local_book.get('bids'):
-                sorted_bids = sorted(local_book['bids'].items(), key=lambda x: float(x[0]), reverse=True)
-                for price_str, size_str in sorted_bids:
-                    size_decimal = self._safe_decimal(size_str)
-                    # 🔥 只添加 size > 0 的条目
-                    if size_decimal and size_decimal > 0:
-                        bids.append(OrderBookLevel(
-                            price=self._safe_decimal(price_str),
-                            size=size_decimal
-                        ))
-            
-            # 构建 asks（从低到高排序，过滤掉 size=0 的条目）
-            if local_book.get('asks'):
-                sorted_asks = sorted(local_book['asks'].items(), key=lambda x: float(x[0]))
-                for price_str, size_str in sorted_asks:
-                    size_decimal = self._safe_decimal(size_str)
-                    # 🔥 只添加 size > 0 的条目
-                    if size_decimal and size_decimal > 0:
-                        asks.append(OrderBookLevel(
-                            price=self._safe_decimal(price_str),
-                            size=size_decimal
-                        ))
-            
+            max_levels = self._orderbook_max_levels
+            bids = self._top_levels(local_book, 'bids', 'bid_px', max_levels, best_is_high=True)
+            asks = self._top_levels(local_book, 'asks', 'ask_px', max_levels, best_is_high=False)
+
             # 🔥 如果 bids 或 asks 为空，返回 None（避免返回无效的订单簿）
             if not bids or not asks:
                 return None
