@@ -1,6 +1,17 @@
-# Lighter–Arcus stock perpetual arbitrage
+# Lighter–Lighter RH (formerly Lighter–Arcus) stock perpetual arbitrage
 
 MU, SNDK, AMD, NVDA, INTC and SPCX use the unified segmented engine with stock basis normalization, value-sized grids and the controls below. Defaults remain **monitor mode**. Offline tests do not certify account permissions, liquidity, profitability or live trading.
+
+## Lighter 主网 ↔ Lighter Robinhood Chain（maker→taker，默认）
+
+Arcus 已被 **Lighter on Robinhood Chain**（`lighter_rh`，<https://robinhoodchain.lighter.xyz>）替代为默认对手所；旧的 Lighter↔Arcus 配置仍保留，可用 `STOCK_VENUE=arcus bash start.sh ...` 启用。
+
+- **执行模式**：`lighter_rh` 为 maker 腿（`order_mode: limit`、`maker_mode: true`、`post_only: true`，挂在 RH 最优买/卖价，被动价不劣于决策价）；成交后立即在 Lighter 主网用市价（taker）对冲。挂单超时（`limit_order_timeout`）或对冲所价格反向移动超过 `maker_cancel_adverse_pct` 时撤单，未成交不对冲；部分成交在满足最小量/最小名义金额时按成交量对冲。对冲保护价按实时价放宽 `hedge_max_slippage_pct`。
+- **为什么这样分工**：RH 盘口较薄、价差较宽（适合挂单赚价差），主网盘口深（适合吃单对冲）。
+- **配置文件**：`config/arbitrage/arbitrage_segmented_rh.yaml`、`arbitrage_lighter_rh.yaml`、`monitor_lighter_rh.yaml`、`multi_exchange_arbitrage_rh.yaml`；`bash start.sh check|monitor|live` 默认使用这些文件（`scripts/start_lighter_rh.sh` 等价）。
+- **凭据**：`.env` 中填写 `LIGHTER_RH_API_KEY_PRIVATE_KEY`、`LIGHTER_RH_ACCOUNT_INDEX`、`LIGHTER_RH_API_KEY_INDEX`（与主网 `LIGHTER_*` 完全独立，不会互相回退）。可选 YAML 模板：`examples/lighter_rh_config.yaml.example`。
+- **RH 要点**：REST `https://api.rh.lighter.xyz`，WS `wss://api.rh.lighter.xyz/stream`，chain ID `466324`；账户、API Key、nonce、market_id 均不与主网通用；API Key 索引 0–3 与 157 保留，请用 4–156 或 158–254；抵押品为 USDG（系统内仍按 USDC 计价）。
+- **风险提示**：Standard 账户 REST 仅 60 次/分钟，且 maker 有 200ms 延迟、taker 300ms 延迟——订单状态轮询已限流，但仍建议先跑 `monitor`，必要时升级 Plus 档（手续费 0.005%/0.005%，需同步修改 `exchange_fees`）。基差 EMA 状态单独保存在 `data/stock_basis_state_lighter_rh.json`。阈值（T1=0.12% 等）按 Arcus 时代设定，费用归零后可在监控数据基础上下调。
 
 ## Install and run
 

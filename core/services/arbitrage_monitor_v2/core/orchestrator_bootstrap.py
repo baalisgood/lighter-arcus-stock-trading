@@ -11,6 +11,8 @@ Orchestrator 引导模块
 拆分该模块可让调度器主类聚焦业务决策与调度顺序，降低函数体积并便于复用。
 """
 
+from core.adapters.exchanges.venues import is_lighter_family
+
 import asyncio
 import logging
 from pathlib import Path
@@ -62,7 +64,7 @@ class OrchestratorBootstrap:
                 config_path = Path(f"config/exchanges/{exchange_name}_config.yaml")
                 exchange_config = None
 
-                if config_path.exists() or exchange_name in ("lighter", "arcus"):
+                if config_path.exists() or exchange_name in ("lighter", "lighter_rh", "arcus"):
                     exchange_config = self._load_exchange_config(
                         exchange_name, config_path, config_loader
                     )
@@ -97,6 +99,7 @@ class OrchestratorBootstrap:
         type_map = {
             "edgex": ExchangeType.SPOT,
             "lighter": ExchangeType.SPOT,
+            "lighter_rh": ExchangeType.SPOT,
             "arcus": ExchangeType.PERPETUAL,
             "hyperliquid": ExchangeType.PERPETUAL,
             "binance": ExchangeType.PERPETUAL,
@@ -110,12 +113,12 @@ class OrchestratorBootstrap:
             with open(config_path, "r", encoding="utf-8") as file:
                 config_data = yaml.safe_load(file)
         except FileNotFoundError as exc:
-            if exchange_name not in ("lighter", "arcus"):
+            if exchange_name not in ("lighter", "lighter_rh", "arcus"):
                 logger.warning(
                     f"⚠️  [{exchange_name}] 配置文件解析失败: {exc}，使用默认配置"
                 )
                 return None
-            config_data = {"extra_params": {"strict_order_state": True}} if exchange_name == "lighter" else {}
+            config_data = {"extra_params": {"strict_order_state": True}} if is_lighter_family(exchange_name) else {}
         except Exception as exc:
             logger.warning(
                 f"⚠️  [{exchange_name}] 配置文件解析失败: {exc}，使用默认配置"
@@ -251,12 +254,12 @@ class OrchestratorBootstrap:
         if exchange_name == "backpack" and api_config.get("private_ws_url"):
             exchange_config.private_ws_url = api_config.get("private_ws_url")
 
-        if exchange_name == "lighter" and auth:
+        if is_lighter_family(exchange_name) and auth:
             exchange_config.api_key_private_key = auth.api_key_private_key
             exchange_config.account_index = auth.account_index
             exchange_config.api_key_index = auth.api_key_index
             logger.info(
-                f"🔑 [Lighter] 已加载认证配置: account_index={auth.account_index}, api_key_private_key_len={len(auth.api_key_private_key)}"
+                f"🔑 [{exchange_name}] 已加载认证配置: account_index={auth.account_index}, api_key_private_key_len={len(auth.api_key_private_key)}"
             )
 
         return exchange_config

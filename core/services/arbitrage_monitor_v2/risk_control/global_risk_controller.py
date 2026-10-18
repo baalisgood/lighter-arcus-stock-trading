@@ -1483,11 +1483,12 @@ class GlobalRiskController:
                         f"[风险控制] 检查{exchange_name}余额失败: {e}", exc_info=True)
 
         bm = self.config.balance_management
-        if bm.equity_gap_alert_enabled and all(x in fresh_equities for x in ("lighter", "arcus")):
-            gap = abs(fresh_equities["lighter"] - fresh_equities["arcus"])
+        counter = next((x for x in ("lighter_rh", "arcus") if x in fresh_equities), None)
+        if bm.equity_gap_alert_enabled and counter and "lighter" in fresh_equities:
+            gap = abs(fresh_equities["lighter"] - fresh_equities[counter])
             now = time.time()
             if gap >= Decimal(str(bm.equity_gap_alert_threshold_usdc)) and now - getattr(self, "_last_equity_gap_alert", 0) >= bm.equity_gap_alert_interval_seconds:
-                logger.warning("⚖️ [权益差额提醒] Lighter/Arcus equity gap=%s USDC; manual review only", gap)
+                logger.warning("⚖️ [权益差额提醒] lighter/%s equity gap=%s USDC; manual review only", counter, gap)
                 self._last_equity_gap_alert = now
 
         # 更新风险状态

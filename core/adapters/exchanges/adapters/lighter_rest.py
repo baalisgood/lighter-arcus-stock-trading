@@ -177,7 +177,7 @@ class LighterRest(LighterBase):
             error_message: 错误信息
         """
         if self._backoff_controller:
-            self._backoff_controller.register_error("lighter", error_code, error_message)
+            self._backoff_controller.register_error(self.exchange_id, error_code, error_message)
 
     def is_connected(self) -> bool:
         """检查是否已连接"""
@@ -286,11 +286,10 @@ class LighterRest(LighterBase):
 
             # 🔥 从环境变量或配置文件加载认证信息（优先使用环境变量）
             # 优先使用环境变量，如果没有则使用配置文件的值
-            api_key_private_key = os.getenv(
-                'LIGHTER_API_KEY_PRIVATE_KEY') or self.api_key_private_key
+            api_key_private_key = os.getenv(f'{self.env_prefix}_API_KEY_PRIVATE_KEY') or self.api_key_private_key
 
             # account_index: 优先环境变量，其次配置文件，最后默认None
-            env_account_index = os.getenv('LIGHTER_ACCOUNT_INDEX')
+            env_account_index = os.getenv(f'{self.env_prefix}_ACCOUNT_INDEX')
             if env_account_index is not None:
                 account_index = int(env_account_index)
             elif self.account_index is not None:
@@ -299,7 +298,7 @@ class LighterRest(LighterBase):
                 account_index = None
 
             # api_key_index: 优先环境变量，其次配置文件，最后默认None
-            env_api_key_index = os.getenv('LIGHTER_API_KEY_INDEX')
+            env_api_key_index = os.getenv(f'{self.env_prefix}_API_KEY_INDEX')
             if env_api_key_index is not None:
                 api_key_index = int(env_api_key_index)
             elif self.api_key_index is not None:
@@ -311,12 +310,9 @@ class LighterRest(LighterBase):
             # auth_enabled只控制WebSocket是否订阅账户数据，不影响REST API的余额查询能力
             if account_index is not None and api_key_private_key:
                 # 显示认证信息来源
-                key_source = "环境变量" if os.getenv(
-                    'LIGHTER_API_KEY_PRIVATE_KEY') else "配置文件"
-                account_source = "环境变量" if os.getenv(
-                    'LIGHTER_ACCOUNT_INDEX') else "配置文件"
-                api_key_index_source = "环境变量" if os.getenv(
-                    'LIGHTER_API_KEY_INDEX') else "配置文件"
+                key_source = "环境变量" if os.getenv(f'{self.env_prefix}_API_KEY_PRIVATE_KEY') else "配置文件"
+                account_source = "环境变量" if os.getenv(f'{self.env_prefix}_ACCOUNT_INDEX') else "配置文件"
+                api_key_index_source = "环境变量" if os.getenv(f'{self.env_prefix}_API_KEY_INDEX') else "配置文件"
 
                 logger.info(
                     f"✅ Lighter 认证信息加载成功:\n"
@@ -527,8 +523,8 @@ class LighterRest(LighterBase):
 
             # 创建 ExchangeInfo 对象
             info = ExchangeInfo(
-                name="Lighter",
-                id="lighter",
+                name="Lighter RH" if self.exchange_id == "lighter_rh" else "Lighter",
+                id=self.exchange_id,
                 type=None,
                 supported_features=[],
                 rate_limits={},
@@ -752,7 +748,7 @@ class LighterRest(LighterBase):
             if cached and now - cached[0] < 2:
                 return cached[1]
             if now < getattr(self, "_account_read_retry_at", 0):
-                raise OrderStateUnknownError("lighter")
+                raise OrderStateUnknownError(self.exchange_id)
             generation = getattr(self, "_account_snapshot_generation", 0)
             try:
                 response = await asyncio.wait_for(self.account_api.account(by="index", value=str(self.account_index)), timeout=5)
@@ -783,7 +779,7 @@ class LighterRest(LighterBase):
                 self._account_snapshot = None
                 throttled = self._is_throttled_read_error(exc)
                 self._account_read_retry_at = time.monotonic() + (30 if throttled else 2)
-                raise OrderStateUnknownError("lighter") from exc
+                raise OrderStateUnknownError(self.exchange_id) from exc
 
     @staticmethod
     def _is_throttled_read_error(exc):
@@ -889,7 +885,7 @@ class LighterRest(LighterBase):
             # 🔥 只写入日志文件，不输出到控制台（避免UI抖动）
             logger.debug("未配置SignerClient，无法获取账户信息")
             if self.strict_order_state:
-                raise OrderStateUnknownError("lighter")
+                raise OrderStateUnknownError(self.exchange_id)
             return []
 
         try:
@@ -900,7 +896,7 @@ class LighterRest(LighterBase):
             if self.strict_order_state and (getattr(response, "code", None) != 200
                     or not getattr(response, "accounts", None) or len(response.accounts) != 1
                     or getattr(response.accounts[0], "index", None) != self.account_index):
-                raise OrderStateUnknownError("lighter")
+                raise OrderStateUnknownError(self.exchange_id)
             balances = []
 
             # 解析 DetailedAccounts 结构
@@ -918,7 +914,7 @@ class LighterRest(LighterBase):
                     available_balance = Decimal(str(getattr(account, "available_balance", None)))
                     collateral = Decimal(str(getattr(account, "collateral", None)))
                     if not available_balance.is_finite() or not collateral.is_finite():
-                        raise OrderStateUnknownError("lighter")
+                        raise OrderStateUnknownError(self.exchange_id)
                 # 计算锁定余额（抵押品 - 可用余额）
                 locked = max(collateral - available_balance, Decimal("0"))
 
@@ -943,7 +939,7 @@ class LighterRest(LighterBase):
 
         except Exception as e:
             if self.strict_order_state:
-                raise OrderStateUnknownError("lighter") from e
+                raise OrderStateUnknownError(self.exchange_id) from e
             error_str = str(e)
             # 🔥 优化：429错误使用WARNING级别，并简化日志格式
             if "429" in error_str or "Too Many Requests" in error_str:
@@ -976,7 +972,7 @@ class LighterRest(LighterBase):
                                    and pending.get("state") == "acknowledged"
                                    and not pending.get("cancel_pending"))
             if self._uncertain_orders and not cancel_known_create:
-                raise OrderStateUnknownError("lighter", client_id=next(iter(self._uncertain_orders)))
+                raise OrderStateUnknownError(self.exchange_id, client_id=next(iter(self._uncertain_orders)))
             key, nonce = await self._next_order_nonce()
             result = sign_method(**params, nonce=nonce, api_key_index=key)
             if not isinstance(result, tuple) or len(result) != 4 or result[3] or not result[1] or not result[2]:
@@ -991,12 +987,12 @@ class LighterRest(LighterBase):
                 if (getattr(response, "code", None) != 200
                         or not getattr(response, "tx_hash", None)
                         or (signed_hash and response.tx_hash != signed_hash)):
-                    raise OrderStateUnknownError("lighter", client_id=str(client_id))
+                    raise OrderStateUnknownError(self.exchange_id, client_id=str(client_id))
                 if str(client_id) in self._uncertain_orders:
                     self._uncertain_orders[str(client_id)]["state"] = "acknowledged"
                 return response
             except BaseException as exc:
-                raise OrderStateUnknownError("lighter", client_id=str(client_id)) from exc
+                raise OrderStateUnknownError(self.exchange_id, client_id=str(client_id)) from exc
 
     async def _call_sdk_write(self, method_name, **params):
         """Keep SDK convenience writes on the same owner until their send completes."""
@@ -1021,7 +1017,7 @@ class LighterRest(LighterBase):
             # 🔥 只写入日志文件，不输出到控制台（避免UI抖动）
             logger.debug("未配置SignerClient，无法获取订单信息")
             if self.strict_order_state:
-                raise OrderStateUnknownError("lighter")
+                raise OrderStateUnknownError(self.exchange_id)
             return []
 
         try:
@@ -1033,7 +1029,7 @@ class LighterRest(LighterBase):
                 if market_id is None:
                     logger.warning(f"未找到交易对 {symbol} 的市场索引")
                     if self.strict_order_state:
-                        raise OrderStateUnknownError("lighter")
+                        raise OrderStateUnknownError(self.exchange_id)
                     return []
 
             # 🔥 重试机制：如果令牌过期，重新生成
@@ -1044,7 +1040,7 @@ class LighterRest(LighterBase):
                 if not auth_token:
                     logger.error(f"获取认证令牌失败")
                     if self.strict_order_state:
-                        raise OrderStateUnknownError("lighter")
+                        raise OrderStateUnknownError(self.exchange_id)
                     return []
 
                 try:
@@ -1073,7 +1069,7 @@ class LighterRest(LighterBase):
                     raise
 
             if self.strict_order_state and (not hasattr(response, "orders") or response.orders is None or getattr(response, "code", 200) != 200):
-                raise OrderStateUnknownError("lighter")
+                raise OrderStateUnknownError(self.exchange_id)
             orders = []
 
             # 🔥 account_active_orders 返回 orders 列表，不是 accounts
@@ -1096,7 +1092,7 @@ class LighterRest(LighterBase):
 
         except Exception as e:
             if self.strict_order_state:
-                raise OrderStateUnknownError("lighter") from e
+                raise OrderStateUnknownError(self.exchange_id) from e
             logger.error(f"获取活跃订单失败: {e}")
             return []
 
@@ -1119,7 +1115,7 @@ class LighterRest(LighterBase):
                 cached = self._order_read_results.get(key)
                 if cached:
                     return deepcopy(cached)
-                raise OrderStateUnknownError("lighter", order_id=order_id)
+                raise OrderStateUnknownError(self.exchange_id, order_id=order_id)
             self._order_read_retry[key] = time.monotonic() + 2
             if len(self._order_read_retry) > 1024:
                 self._order_read_retry.pop(next(iter(self._order_read_retry)))
@@ -1195,7 +1191,7 @@ class LighterRest(LighterBase):
                 return matched
 
             if self.strict_order_state:
-                raise OrderStateUnknownError("lighter", order_id=order_id)
+                raise OrderStateUnknownError(self.exchange_id, order_id=order_id)
             logger.warning(
                 f"⚠️ Lighter未找到订单 {order_id} 的详细信息（可能尚未同步或已被清理），返回占位数据"
             )
@@ -1240,7 +1236,7 @@ class LighterRest(LighterBase):
             # 🔥 只写入日志文件，不输出到控制台（避免UI抖动）
             logger.debug("未配置SignerClient，无法获取订单历史")
             if self.strict_order_state:
-                raise OrderStateUnknownError("lighter")
+                raise OrderStateUnknownError(self.exchange_id)
             return []
 
         try:
@@ -1249,7 +1245,7 @@ class LighterRest(LighterBase):
             if not auth_token:
                 logger.error(f"获取认证令牌失败")
                 if self.strict_order_state:
-                    raise OrderStateUnknownError("lighter")
+                    raise OrderStateUnknownError(self.exchange_id)
                 return []
 
             # 获取市场ID（如果指定了symbol）
@@ -1257,7 +1253,7 @@ class LighterRest(LighterBase):
             if symbol:
                 market_id = self.get_market_index(symbol)
                 if self.strict_order_state and market_id is None:
-                    raise OrderStateUnknownError("lighter")
+                    raise OrderStateUnknownError(self.exchange_id)
 
             # 获取历史订单 (Lighter API 限制 limit <= 100)
             safe_limit = min(limit, 100)
@@ -1266,7 +1262,7 @@ class LighterRest(LighterBase):
             )
 
             if self.strict_order_state and (not hasattr(response, "orders") or response.orders is None or getattr(response, "code", 200) != 200):
-                raise OrderStateUnknownError("lighter")
+                raise OrderStateUnknownError(self.exchange_id)
             orders = []
             if hasattr(response, 'orders') and response.orders:
                 for order_info in response.orders:
@@ -1279,7 +1275,7 @@ class LighterRest(LighterBase):
 
         except Exception as e:
             if self.strict_order_state:
-                raise OrderStateUnknownError("lighter") from e
+                raise OrderStateUnknownError(self.exchange_id) from e
             # ⚠️ Lighter 有时会返回 20013 invalid auth / expired token
             # 这通常表示当前环境下 REST 历史订单接口不可用（但 WebSocket 仍然正常）
             error_str = str(e)
@@ -1306,7 +1302,7 @@ class LighterRest(LighterBase):
             # 🔥 只写入日志文件，不输出到控制台（避免UI抖动）
             logger.debug("未配置SignerClient，无法获取持仓信息")
             if self.strict_order_state:
-                raise OrderStateUnknownError("lighter")
+                raise OrderStateUnknownError(self.exchange_id)
             return []
 
         # 🔥 429错误重试机制：最多重试2次，使用指数退避
@@ -1334,16 +1330,16 @@ class LighterRest(LighterBase):
                     else:
                         logger.warning(f"[Lighter] 持仓查询失败: 达到最大重试次数，限流持续")
                         if self.strict_order_state:
-                            raise OrderStateUnknownError("lighter")
+                            raise OrderStateUnknownError(self.exchange_id)
                         return []
                 else:
                     # 非429错误，直接抛出
                     raise
 
         if self.strict_order_state and (not getattr(response, "accounts", None) or len(response.accounts) != 1 or getattr(response, "code", 200) != 200):
-            raise OrderStateUnknownError("lighter")
+            raise OrderStateUnknownError(self.exchange_id)
         if self.strict_order_state and getattr(response.accounts[0], "index", self.account_index) != self.account_index:
-            raise OrderStateUnknownError("lighter")
+            raise OrderStateUnknownError(self.exchange_id)
         # 继续原有的持仓解析逻辑
         positions = []
         # 解析 DetailedAccounts 结构
@@ -1376,11 +1372,11 @@ class LighterRest(LighterBase):
                     if self.strict_order_state:
                         sign = getattr(position_info, "sign", None)
                         if sign not in (-1, 1):
-                            raise OrderStateUnknownError("lighter")
+                            raise OrderStateUnknownError(self.exchange_id)
                         position_side = PositionSide.LONG if sign == 1 else PositionSide.SHORT
                         symbol = self._get_symbol_from_market_index(getattr(position_info, "market_id", None))
                         if not symbol:
-                            raise OrderStateUnknownError("lighter")
+                            raise OrderStateUnknownError(self.exchange_id)
 
                     positions.append(PositionData(
                         symbol=symbol,
@@ -1723,10 +1719,10 @@ class LighterRest(LighterBase):
                     logger.warning(
                         f"⚠️ client_order_id 不是有效整数: {client_order_id}，使用自动生成")
                     client_order_id = int(
-                        asyncio.get_event_loop().time() * 1000)
+                        asyncio.get_event_loop().time() * 1000) + self.client_order_id_offset
         else:
             # 如果未提供，生成默认值
-            client_order_id = int(asyncio.get_event_loop().time() * 1000)
+            client_order_id = int(asyncio.get_event_loop().time() * 1000) + self.client_order_id_offset
 
         # 🔥 注意：Lighter SDK 的 create_market_order 不接受 margin_mode 参数
         # SDK 签名: create_market_order(market_index, client_order_index, base_amount,
@@ -1801,7 +1797,7 @@ class LighterRest(LighterBase):
         return {
             'market_index': market_info['market_index'],
             'client_order_index': kwargs.get("client_order_id",
-                                             int(asyncio.get_event_loop().time() * 1000)),
+                                             int(asyncio.get_event_loop().time() * 1000) + self.client_order_id_offset),
             'base_amount': base_amount_int,
             'price': price_int,
             'is_ask': is_ask,
@@ -2032,7 +2028,7 @@ class LighterRest(LighterBase):
             raise RuntimeError(msg)
 
         if self.strict_order_state and self._uncertain_orders:
-            raise OrderStateUnknownError("lighter", client_id=next(iter(self._uncertain_orders)))
+            raise OrderStateUnknownError(self.exchange_id, client_id=next(iter(self._uncertain_orders)))
         signed_payloads: List[Dict[str, Any]] = []
         api_key_indices: List[int] = []
         order_contexts: List[Dict[str, Any]] = []
@@ -2138,7 +2134,7 @@ class LighterRest(LighterBase):
         try:
             if self.strict_order_state:
                 if self._uncertain_orders:
-                    raise OrderStateUnknownError("lighter", client_id=next(iter(self._uncertain_orders)))
+                    raise OrderStateUnknownError(self.exchange_id, client_id=next(iter(self._uncertain_orders)))
                 for item in signed_payloads:
                     ctx = item["context"]
                     self._register_order_intent(ctx["client_order_id"], ctx["symbol"], ctx["side"], ctx["quantity"])
@@ -2152,7 +2148,7 @@ class LighterRest(LighterBase):
                     or any(not isinstance(h, str) or not h for h in response["tx_hash"])
                     or any(item.get("tx_hash") and item["tx_hash"] != h
                            for item, h in zip(signed_payloads, response["tx_hash"]))):
-                raise OrderStateUnknownError("lighter")
+                raise OrderStateUnknownError(self.exchange_id)
             # 统一打印一次返回摘要，便于排障：
             # - 若返回中包含 error，说明交易请求并未真正成功（可能被拒绝/限流/参数错误）
             # - 若无 tx_hash，则后续很难从链上/服务端侧追踪
@@ -2191,7 +2187,7 @@ class LighterRest(LighterBase):
             return response
         except BaseException as e:
             if self.strict_order_state:
-                raise OrderStateUnknownError("lighter", client_id=str(order_contexts[0]["client_order_id"])) from e
+                raise OrderStateUnknownError(self.exchange_id, client_id=str(order_contexts[0]["client_order_id"])) from e
             if not isinstance(e, Exception):
                 raise
             logger.error(f"WS批量市价单发送失败: {e}")
@@ -2215,7 +2211,7 @@ class LighterRest(LighterBase):
         side = (context.get("side") or "").lower()
         quantity = Decimal(str(context.get("quantity", "0")))
         client_order_id = context.get("client_order_id") or int(
-            asyncio.get_event_loop().time() * 1000)
+            asyncio.get_event_loop().time() * 1000) + self.client_order_id_offset
         avg_price = context.get("avg_execution_price")
 
         order_side = OrderSide.BUY if side != "sell" else OrderSide.SELL
@@ -2260,7 +2256,7 @@ class LighterRest(LighterBase):
         # 🔥 生成唯一的 client_order_id（确保整个流程使用同一个值）
         if "client_order_id" not in kwargs:
             kwargs["client_order_id"] = int(
-                asyncio.get_event_loop().time() * 1000)
+                asyncio.get_event_loop().time() * 1000) + self.client_order_id_offset
 
         # 🔥 获取滑点倍数（支持动态调整）
         slippage_multiplier = kwargs.pop("slippage_multiplier", Decimal("1.0"))
@@ -2319,7 +2315,7 @@ class LighterRest(LighterBase):
         # 🔥 生成唯一的 client_order_id（确保整个流程使用同一个值）
         if "client_order_id" not in kwargs:
             kwargs["client_order_id"] = int(
-                asyncio.get_event_loop().time() * 1000)
+                asyncio.get_event_loop().time() * 1000) + self.client_order_id_offset
 
         # 转换参数
         params = self._convert_limit_order_params(
@@ -2441,7 +2437,7 @@ class LighterRest(LighterBase):
         from datetime import datetime
 
         client_order_id_str = str(kwargs.get("client_order_id", int(
-            asyncio.get_event_loop().time() * 1000)))
+            asyncio.get_event_loop().time() * 1000) + self.client_order_id_offset))
         order_id = client_order_id_str
         logger.debug(
             f"🌐 [REST] 使用临时 client_order_id={order_id}"
@@ -2694,7 +2690,7 @@ class LighterRest(LighterBase):
             raise
         except Exception as e:
             if self.strict_order_state:
-                raise OrderStateUnknownError("lighter", order_id=order_id) from e
+                raise OrderStateUnknownError(self.exchange_id, order_id=order_id) from e
             logger.error(f"取消订单失败 {symbol}/{order_id}: {e}")
             return False
 
@@ -2942,13 +2938,13 @@ class LighterRest(LighterBase):
                         and (filled_amount != initial_amount or remaining_amount != 0))
                     or not isinstance(getattr(order_info, "is_ask", None), bool)
                     or not getattr(order_info, "status", None)):
-                raise OrderStateUnknownError("lighter")
+                raise OrderStateUnknownError(self.exchange_id)
             identity = str(getattr(order_info, "client_order_index", ""))
             expected = getattr(self, "_submitted_orders", {}).get(identity)
             if expected and (expected[2] != initial_amount
                     or expected[1] != ("sell" if order_info.is_ask else "buy")
                     or getattr(order_info, "market_index", None) != expected[3]):
-                raise OrderStateUnknownError("lighter", client_id=identity)
+                raise OrderStateUnknownError(self.exchange_id, client_id=identity)
 
         # 解析价格
         price = self._safe_decimal(getattr(order_info, 'price', 0))

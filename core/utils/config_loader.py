@@ -258,7 +258,7 @@ class ExchangeConfigLoader:
             if auth_config.private_key and not auth_config.api_secret:
                 auth_config.api_secret = auth_config.private_key
         
-        elif exchange_name == 'lighter':
+        elif exchange_name in ('lighter', 'lighter_rh'):
             # Lighter 的 api_key 和 api_secret 都使用 api_key_private_key
             if auth_config.api_key_private_key and not auth_config.api_key:
                 auth_config.api_key = auth_config.api_key_private_key

@@ -7,6 +7,7 @@
 - 节流控制（500ms），避免阻塞 WebSocket
 """
 
+from core.adapters.exchanges.venues import is_lighter_family
 import time
 from datetime import datetime
 from typing import Dict, Optional, List
@@ -82,7 +83,7 @@ class RealtimeScroller:
             price_change_pct = abs(current_price - last_price) / last_price * 100
             
             # 🔥 Lighter使用0.001%阈值（10倍更敏感）
-            threshold = 0.001 if exchange == "lighter" else 0.01
+            threshold = 0.001 if is_lighter_family(exchange) else 0.01
             
             if price_change_pct < threshold:  # 变化小于阈值，跳过
                 # 🔥 移除debug日志（问题已定位）

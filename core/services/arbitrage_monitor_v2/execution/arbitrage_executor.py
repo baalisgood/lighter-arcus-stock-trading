@@ -15,6 +15,7 @@
 - order_strategy_executor：负责限价/市价/双限价等策略执行
 """
 
+from core.adapters.exchanges.venues import is_lighter_family
 import asyncio
 from core.adapters.exchanges.order_state import OrderStateUnknownError
 import logging
@@ -387,6 +388,8 @@ class ArbitrageExecutor:
         self._network_retry_max_delay: float = 15.0
         # 🔒 lighter REST 下单串行锁，确保 nonce 递增
         self._lighter_order_lock: asyncio.Lock = asyncio.Lock()
+        # Separate venues have separate nonces: one serial lock per Lighter-family exchange.
+        self._lighter_order_locks: Dict[str, asyncio.Lock] = {"lighter": self._lighter_order_lock}
 
         # 🔥 lighter 单腿成交计数器 {symbol: count}
         self._lighter_single_leg_counter: Dict[str, int] = {}
@@ -1212,7 +1215,7 @@ class ArbitrageExecutor:
                     getattr(self.exchange_adapters.get(exchange), '_uncertain', None)
                     for exchange in (request.exchange_buy, request.exchange_sell)
                 ):
-                    raise OrderStateUnknownError('arcus')
+                    raise OrderStateUnknownError(request.exchange_sell or request.exchange_buy or 'unknown')
                 if self.is_segmented_mode:
                     self._validate_pair_quantity(request)
                 if not request.is_open and getattr(self, "before_close_check", None):
@@ -1469,8 +1472,9 @@ class ArbitrageExecutor:
         absolute_offset: Optional[Decimal] = None,
         request: Optional[ExecutionRequest] = None,
         override_price: Optional[Decimal] = None,
+        time_in_force: Optional[str] = None,
     ) -> Optional[OrderData]:
-        """下限价订单"""
+        """下限价订单（time_in_force 可传 POST_ONLY 用于 maker 挂单）"""
         side = OrderSide.BUY if is_buy else OrderSide.SELL
         exchange_name = self._get_exchange_name(adapter)
         exchange_tag = self._format_exchange_tag(exchange_name)
@@ -1579,8 +1583,10 @@ class ArbitrageExecutor:
                                 break
                             limit_price = rounded
                     params = {'timeInForce': 'GTC'}
+                    if time_in_force:
+                        params['time_in_force'] = time_in_force
                     if (request and self._should_use_reduce_only(exchange_name, request.is_open)
-                            and not (exchange_name == 'lighter' and ('SPOT' in symbol.upper() or 'SPOT' in request.symbol.upper()))):
+                            and not (is_lighter_family(exchange_name) and ('SPOT' in symbol.upper() or 'SPOT' in request.symbol.upper()))):
                         params['reduce_only'] = True
                     order = await adapter.create_order(
                         symbol=symbol,
@@ -1618,8 +1624,8 @@ class ArbitrageExecutor:
                         continue
                     return None
 
-        if exchange_name and exchange_name.lower() == "lighter":
-            async with self._lighter_order_lock:
+        if is_lighter_family(exchange_name):
+            async with self._lighter_lock_for(exchange_name):
                 return await _place_with_retry()
         return await _place_with_retry()
 
@@ -1648,8 +1654,7 @@ class ArbitrageExecutor:
                 exchange_name, is_open_context)
         attempt = 0
         use_lighter_ws = (
-            exchange_name
-            and exchange_name.lower() == "lighter"
+            is_lighter_family(exchange_name)
             and hasattr(adapter, "place_market_orders_ws_batch")
             and not force_rest
         )
@@ -1683,8 +1688,7 @@ class ArbitrageExecutor:
 
                         # 🔥 Lighter: REST 市价单支持 slippage_multiplier（用于复用现有“滑点倍数放大”方案）
                         if (
-                            exchange_name
-                            and exchange_name.lower() == "lighter"
+                            is_lighter_family(exchange_name)
                             and slippage_override is not None
                         ):
                             try:
@@ -1742,12 +1746,11 @@ class ArbitrageExecutor:
                     return None
 
         should_lock = (
-            exchange_name
-            and exchange_name.lower() == "lighter"
+            is_lighter_family(exchange_name)
             and not use_lighter_ws
         )
         if should_lock:
-            async with self._lighter_order_lock:
+            async with self._lighter_lock_for(exchange_name):
                 return await _place_with_retry()
         return await _place_with_retry()
 
@@ -1827,9 +1830,9 @@ class ArbitrageExecutor:
                                               if hasattr(adapter, "_normalize_symbol") else symbol)
                     or orders[0].side != (OrderSide.BUY if is_buy else OrderSide.SELL)
                     or orders[0].amount != quantity):
-                raise OrderStateUnknownError("lighter")
+                raise OrderStateUnknownError(self._get_exchange_name(adapter) or "lighter")
             order = orders[0]
-            self._register_order_exchange_mapping(order, "lighter")
+            self._register_order_exchange_mapping(order, self._get_exchange_name(adapter) or "lighter")
             return order
         except OrderStateUnknownError:
             raise
@@ -1865,7 +1868,7 @@ class ArbitrageExecutor:
         - time_in_force=IOC：尽量贴近市价行为，但仍可在链上/撮合层面更“可见”
         """
         exchange_name = self._get_exchange_name(adapter)
-        if not exchange_name or exchange_name.lower() != "lighter":
+        if not is_lighter_family(exchange_name):
             return None
 
         # 计算 slippage_multiplier（LighterRest 使用 base_slippage * multiplier）
@@ -2114,8 +2117,8 @@ class ArbitrageExecutor:
                 logger.error(f"[套利执行] 取消订单失败: {e}", exc_info=True)
                 return False
 
-        if exchange_name and exchange_name.lower() == "lighter":
-            async with self._lighter_order_lock:
+        if is_lighter_family(exchange_name):
+            async with self._lighter_lock_for(exchange_name):
                 return await _do_cancel()
         return await _do_cancel()
 
@@ -2181,7 +2184,7 @@ class ArbitrageExecutor:
         """
         if not exchange_name:
             return False
-        return exchange_name.lower() in ("lighter", "arcus") and not is_open
+        return exchange_name.lower() in ("lighter", "lighter_rh", "arcus") and not is_open
 
     @staticmethod
     def _iter_order_keys(order: OrderData) -> Set[str]:
@@ -2257,6 +2260,15 @@ class ArbitrageExecutor:
             return
         for key in self._iter_order_keys(order):
             self._order_exchange_map[key] = exchange_name
+
+    def _lighter_lock_for(self, exchange_name: Optional[str]) -> asyncio.Lock:
+        """Serial submission lock per Lighter-family venue (nonces are per exchange)."""
+        key = str(exchange_name or "lighter").lower()
+        lock = self._lighter_order_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._lighter_order_locks[key] = lock
+        return lock
 
     def _register_lighter_ws_orders(self, orders_payload: Any) -> None:
         """注册Lighter批量订单的ID映射"""
@@ -3240,7 +3252,7 @@ class ArbitrageExecutor:
             if getattr(self, "market_constraints", {}):
                 raise ValueError("Missing active stock market constraints")
             return
-        if set(constraints.get("min_notional_by_exchange", {})) != {"lighter", "arcus"}:
+        if not {request.exchange_buy, request.exchange_sell} <= set(constraints.get("min_notional_by_exchange", {})):
             raise ValueError("Missing venue minimum notional constraints")
         quantity = request.quantity
         step = Decimal(str(constraints["quantity_step"]))

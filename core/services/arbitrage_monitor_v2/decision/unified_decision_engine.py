@@ -124,7 +124,12 @@ class UnifiedDecisionEngine:
         value = None
         try:
             mids = {}
-            for exchange in ("lighter", "arcus"):
+            # Basis is always center (lighter mainnet) vs its counter venue (lighter_rh or legacy arcus).
+            counters = [name for name in orderbooks if name != "lighter"]
+            if len(counters) != 1:
+                raise KeyError("stock basis requires lighter plus one counter venue")
+            counter = counters[0]
+            for exchange in ("lighter", counter):
                 ob = orderbooks[exchange]
                 stamp = getattr(ob, "received_timestamp", None) or getattr(ob, "timestamp", None)
                 source_stamp = getattr(ob, "timestamp", None)
@@ -137,7 +142,7 @@ class UnifiedDecisionEngine:
                 if any(not x.is_finite() or x <= 0 for x in prices + sizes) or prices[0] > prices[1]:
                     raise ValueError("invalid BBO")
                 mids[exchange] = sum(prices) / 2
-            value = float((mids["lighter"] - mids["arcus"]) / mids["arcus"] * 100)
+            value = float((mids["lighter"] - mids[counter]) / mids[counter] * 100)
         except (KeyError, IndexError, ValueError, TypeError, AttributeError):
             pass
         clock = time.time() if now is None else now

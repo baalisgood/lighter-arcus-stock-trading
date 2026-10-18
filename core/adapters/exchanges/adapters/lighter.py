@@ -28,6 +28,14 @@ from .lighter_websocket import LighterWebSocket
 class LighterAdapter(ExchangeAdapter):
     """Lighter交易所适配器 - 统一接口"""
 
+    # Venue identity. Subclasses (e.g. Lighter on Robinhood Chain) override these.
+    EXCHANGE_ID = "lighter"
+    CONFIG_FILE = "config/exchanges/lighter_config.yaml"
+    DEFAULT_API_URL: Optional[str] = None
+    DEFAULT_WS_URL: Optional[str] = None
+    DEFAULT_CHAIN_ID: Optional[int] = None
+    CLIENT_ORDER_ID_OFFSET = 0
+
     def __init__(self, config: ExchangeConfig, event_bus=None):
         super().__init__(config, event_bus)
 
@@ -117,7 +125,7 @@ class LighterAdapter(ExchangeAdapter):
                 self.logger.warning(f"创建Lighter订阅管理器失败，使用默认配置: {e}")
             # 使用默认配置
             default_config = {
-                'exchange_id': 'lighter',
+                'exchange_id': getattr(self, 'EXCHANGE_ID', LighterAdapter.EXCHANGE_ID),
                 'subscription_mode': {
                     'mode': 'predefined',
                     'predefined': {
@@ -158,7 +166,7 @@ class LighterAdapter(ExchangeAdapter):
             lighter_config = self._load_lighter_config()
             
             # 🔥 检查配置是否加载成功
-            if not lighter_config or lighter_config == {'exchange_id': 'lighter'}:
+            if not lighter_config or lighter_config == {'exchange_id': getattr(self, 'EXCHANGE_ID', LighterAdapter.EXCHANGE_ID)}:
                 raise ValueError("配置文件加载失败或为空")
             
             api_config = lighter_config.get('api_config', {})
@@ -256,13 +264,28 @@ class LighterAdapter(ExchangeAdapter):
         if hasattr(config, 'ws_url'):
             config_dict['ws_url'] = config.ws_url
 
-        config_dict["strict_order_state"] = bool((config.extra_params or {}).get("strict_order_state", False))
+        extra = config.extra_params or {}
+        config_dict["strict_order_state"] = bool(extra.get("strict_order_state", False))
+
+        # Venue identity, endpoints, chain ID and credential prefix always travel together.
+        config_dict["exchange_id"] = getattr(self, 'EXCHANGE_ID', LighterAdapter.EXCHANGE_ID)
+        config_dict["env_prefix"] = getattr(self, 'EXCHANGE_ID', LighterAdapter.EXCHANGE_ID).upper()
+        if getattr(config, "base_url", None):
+            config_dict["api_url"] = config.base_url
+        elif not config_dict.get("api_url") and getattr(self, 'DEFAULT_API_URL', LighterAdapter.DEFAULT_API_URL):
+            config_dict["api_url"] = getattr(self, 'DEFAULT_API_URL', LighterAdapter.DEFAULT_API_URL)
+        if not config_dict.get("ws_url") and getattr(self, 'DEFAULT_WS_URL', LighterAdapter.DEFAULT_WS_URL):
+            config_dict["ws_url"] = getattr(self, 'DEFAULT_WS_URL', LighterAdapter.DEFAULT_WS_URL)
+        chain_id = extra.get("chain_id", getattr(self, 'DEFAULT_CHAIN_ID', LighterAdapter.DEFAULT_CHAIN_ID))
+        if chain_id is not None:
+            config_dict["chain_id"] = int(chain_id)
+        config_dict["client_order_id_offset"] = int(extra.get("client_order_id_offset", getattr(self, 'CLIENT_ORDER_ID_OFFSET', LighterAdapter.CLIENT_ORDER_ID_OFFSET)) or 0)
         return config_dict
 
     def _load_lighter_config(self) -> Dict[str, Any]:
         """加载Lighter配置文件"""
         from pathlib import Path
-        config_path = Path("config/exchanges/lighter_config.yaml")
+        config_path = Path(getattr(self, 'CONFIG_FILE', LighterAdapter.CONFIG_FILE))
 
         try:
             with open(config_path, 'r', encoding='utf-8') as f:
@@ -278,11 +301,11 @@ class LighterAdapter(ExchangeAdapter):
         except FileNotFoundError:
             if self.logger:
                 self.logger.warning(f"⚠️ Lighter配置文件未找到: {config_path}")
-            return {'exchange_id': 'lighter'}
+            return {'exchange_id': getattr(self, 'EXCHANGE_ID', LighterAdapter.EXCHANGE_ID)}
         except Exception as e:
             if self.logger:
                 self.logger.error(f"❌ 加载Lighter配置文件失败: {e}", exc_info=True)
-            return {'exchange_id': 'lighter'}
+            return {'exchange_id': getattr(self, 'EXCHANGE_ID', LighterAdapter.EXCHANGE_ID)}
 
     def _get_symbol_cache_service(self):
         """获取符号缓存服务实例"""
@@ -403,7 +426,7 @@ class LighterAdapter(ExchangeAdapter):
             Dict: 健康状态信息
         """
         status = {
-            "exchange": "lighter",
+            "exchange": getattr(self, 'EXCHANGE_ID', LighterAdapter.EXCHANGE_ID),
             "connected": self._connected,
             "authenticated": self._authenticated,
             "timestamp": datetime.now().isoformat()

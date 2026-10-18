@@ -79,14 +79,14 @@ def parse_args():
     parser.add_argument(
         "--config",
         type=Path,
-        default=Path("config/arbitrage/arbitrage_segmented.yaml"),
+        default=Path("config/arbitrage/arbitrage_segmented_rh.yaml"),
         help="分段配置文件路径"
     )
     
     parser.add_argument(
         "--monitor-config",
         type=Path,
-        default=Path("config/arbitrage/monitor_lighter_arcus.yaml"),
+        default=Path("config/arbitrage/monitor_lighter_rh.yaml"),
         help="监控配置文件路径"
     )
 
@@ -106,7 +106,7 @@ def parse_args():
         help="启用调试模式"
     )
     
-    parser.add_argument("--execution-config", type=Path, default=Path("config/arbitrage/arbitrage_lighter_arcus.yaml"))
+    parser.add_argument("--execution-config", type=Path, default=Path("config/arbitrage/arbitrage_lighter_rh.yaml"))
     return parser.parse_args()
 
 
@@ -114,7 +114,10 @@ def _stock_basis_state_path(config_path):
     import yaml
     profile = yaml.safe_load(Path(config_path).read_text())
     if profile.get("system_mode", {}).get("stock_profile", False) and profile.get("default_config", {}).get("grid_config", {}).get("basis_config", {}).get("enabled", False):
-        return Path(__file__).resolve().parent / "data" / "stock_basis_state.json"
+        venues = set(profile.get("decision", {}).get("exchange_order_modes", {}) or {}) - {"default", "lighter"}
+        # Basis EMA differs per venue pair; keep Lighter RH state separate from the legacy Arcus state.
+        name = "stock_basis_state_lighter_rh.json" if "lighter_rh" in venues else "stock_basis_state.json"
+        return Path(__file__).resolve().parent / "data" / name
     return None
 
 

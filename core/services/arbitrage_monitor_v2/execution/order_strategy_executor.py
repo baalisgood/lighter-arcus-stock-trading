@@ -11,6 +11,7 @@ from __future__ import annotations
 此模块不做依赖注入或状态管理，所有外部依赖通过 `executor` 传入，做到“可读、可复用、不改功能”。
 """
 
+from core.adapters.exchanges.venues import is_lighter_family
 import asyncio
 from core.adapters.exchanges.order_state import OrderStateUnknownError
 import time
@@ -459,7 +460,7 @@ class OrderStrategyExecutor:
         target_quantity = executor._to_decimal_value(quantity)
         base_slippage = executor._get_slippage_percent(request)
         last_slippage_override: Optional[Decimal] = base_slippage
-        lighter_retry_mode = bool(exchange_name and exchange_name.lower() == "lighter")
+        lighter_retry_mode = is_lighter_family(exchange_name)
         aggressive_limit_attempted = False
 
         while True:
@@ -908,6 +909,16 @@ class OrderStrategyExecutor:
 
             min_second_leg_qty = executor._resolve_min_order_qty(request, second_exchange)
             min_first_leg_qty = executor._resolve_min_order_qty(request, first_exchange)
+            maker_cfg = (
+                first_exchange_config
+                if getattr(first_exchange_config, "maker_mode", False)
+                and execution_plan.get("first_order_mode") == "limit"
+                and execution_plan.get("second_order_mode") == "market"
+                else None
+            )
+            hedge_ref_price = executor._to_decimal_value(
+                request.price_buy if second_is_buy else request.price_sell
+            ) if maker_cfg else None
             accumulated_fill = Decimal("0")
             max_partial_attempts = max(
                 1,
@@ -944,15 +955,59 @@ class OrderStrategyExecutor:
                     f"价格={first_price}, 数量={submit_quantity} (第{limit_attempt}次)"
                 )
 
-                limit_order = await executor._place_limit_order(
-                    first_adapter,
-                    first_symbol,
-                    first_price,
-                    submit_quantity,
-                    is_buy=execution_plan["first_is_buy"],
-                    absolute_offset=first_absolute_offset,
-                    request=request,
-                )
+                if maker_cfg:
+                    maker_price, maker_reason = self._maker_quote(
+                        request=request,
+                        maker_exchange=first_exchange,
+                        maker_symbol=first_symbol,
+                        maker_is_buy=execution_plan["first_is_buy"],
+                        hedge_exchange=second_exchange,
+                        hedge_symbol=second_symbol,
+                        hedge_is_buy=second_is_buy,
+                        hedge_ref_price=hedge_ref_price,
+                        maker_cfg=maker_cfg,
+                    )
+                    if maker_price is None:
+                        logger.info(f"[Maker→Taker] [{first_tag}] 放弃挂单: {maker_reason}")
+                        return self._result_failure(
+                            request,
+                            f"Maker挂单条件不满足 ({first_exchange}): {maker_reason}",
+                            mark_waiting=False,
+                            failure_code="maker_quote_unavailable",
+                        )
+                    first_price = maker_price
+                    logger.info(
+                        f"[Maker→Taker] [{first_tag}] 挂被动单: {'买' if execution_plan['first_is_buy'] else '卖'} "
+                        f"{submit_quantity} @ {maker_price} (post_only={maker_cfg.post_only}); "
+                        f"对冲所 {second_tag} 决策价={hedge_ref_price}"
+                    )
+                    limit_order = await executor._place_limit_order(
+                        first_adapter,
+                        first_symbol,
+                        maker_price,
+                        submit_quantity,
+                        is_buy=execution_plan["first_is_buy"],
+                        request=request,
+                        override_price=maker_price,
+                        time_in_force="POST_ONLY" if maker_cfg.post_only else None,
+                    )
+                else:
+                    limit_order = await executor._place_limit_order(
+                        first_adapter,
+                        first_symbol,
+                        first_price,
+                        submit_quantity,
+                        is_buy=execution_plan["first_is_buy"],
+                        absolute_offset=first_absolute_offset,
+                        request=request,
+                    )
+                if not limit_order and maker_cfg:
+                    return self._result_failure(
+                        request,
+                        f"Maker挂单提交失败 ({first_exchange})",
+                        mark_waiting=False,
+                        failure_code="maker_submit_failed",
+                    )
                 if not limit_order:
                     limit_order = await self._retry_limit_submission(
                         adapter=first_adapter,
@@ -991,6 +1046,31 @@ class OrderStrategyExecutor:
                     f"价格={submitted_price}, 数量={submit_quantity}"
                 )
 
+                if maker_cfg and not executor.monitor_only:
+                    maker_filled, maker_exit = await self._wait_maker_fill(
+                        order=limit_order,
+                        adapter=first_adapter,
+                        symbol=first_symbol,
+                        timeout=limit_timeout,
+                        target_quantity=submit_quantity,
+                        hedge_exchange=second_exchange,
+                        hedge_symbol=second_symbol,
+                        hedge_is_buy=second_is_buy,
+                        hedge_ref_price=hedge_ref_price,
+                        maker_cfg=maker_cfg,
+                        tag=first_tag,
+                    )
+                    # Maker orders are terminal here (filled or cancelled); never re-quote inside one plan.
+                    if maker_filled <= epsilon:
+                        logger.info(f"[Maker→Taker] [{first_tag}] 挂单未成交并已撤销: {maker_exit}")
+                        zero_fill_abort = True
+                        zero_fill_order_id = limit_order.id
+                        break
+                    accumulated_fill += maker_filled
+                    logger.info(
+                        f"✅ [Maker→Taker] [{first_tag}] 挂单成交 {maker_filled}/{submit_quantity} ({maker_exit})，立即对冲"
+                    )
+                    break
                 filled_quantity = await executor.order_monitor.wait_for_order_fill(
                     limit_order,
                     first_adapter,
@@ -1141,6 +1221,18 @@ class OrderStrategyExecutor:
                 )
 
             filled_decimal = accumulated_fill
+            if (
+                maker_cfg
+                and filled_decimal + epsilon < requested_quantity
+                and getattr(maker_cfg, "maker_hedge_partial_fill", True)
+                and self._maker_partial_is_hedgeable(
+                    request, filled_decimal, min_first_leg_qty, min_second_leg_qty
+                )
+            ):
+                logger.info(
+                    f"[Maker→Taker] [{first_tag}] 部分成交 {filled_decimal}/{requested_quantity}，按实际成交量对冲"
+                )
+                requested_quantity = filled_decimal
             if filled_decimal + epsilon < requested_quantity:
                 remaining_quantity = max(Decimal("0"), requested_quantity - filled_decimal)
                 logger.warning(
@@ -1340,6 +1432,12 @@ class OrderStrategyExecutor:
                         f"数量={filled_decimal} (根据第一腿实际成交数量)"
                     )
                     # 原有的市价单逻辑
+                    if maker_cfg:
+                        # The maker fill is final: the hedge (and any failed-leg retry of this
+                        # request) must be allowed to execute around the live hedge price.
+                        self._prepare_maker_hedge_bounds(
+                            request, second_exchange, second_symbol, second_is_buy, filled_decimal, maker_cfg
+                        )
                     market_order = await executor._place_market_order(
                         second_adapter,
                         second_symbol,
@@ -1636,6 +1734,215 @@ class OrderStrategyExecutor:
                 request,
                 str(exc),
             )
+
+    # ------------------------------------------------------------------ #
+    # Maker→Taker helpers (lighter_rh maker, lighter taker hedge)
+    # ------------------------------------------------------------------ #
+
+    def _fresh_book(self, exchange: str, symbol: str):
+        executor = self.executor
+        try:
+            return executor.data_processor.get_orderbook(
+                exchange, symbol, max_age_seconds=executor._get_data_freshness_seconds(exchange)
+            )
+        except Exception:
+            return None
+
+    def _hedge_adverse_reason(
+        self,
+        *,
+        hedge_exchange: str,
+        hedge_symbol: str,
+        hedge_is_buy: bool,
+        hedge_ref_price: Optional[Decimal],
+        maker_cfg: Any,
+    ) -> Optional[str]:
+        """Returns a reason when the hedge venue moved against the plan (or is unavailable)."""
+        book = self._fresh_book(hedge_exchange, hedge_symbol)
+        level = getattr(book, "best_ask" if hedge_is_buy else "best_bid", None) if book else None
+        price = getattr(level, "price", None)
+        if price is None:
+            return "对冲所盘口不可用/过期"
+        live = self.executor._to_decimal_value(price)
+        if not hedge_ref_price or hedge_ref_price <= 0 or live <= 0:
+            return "对冲参考价无效"
+        adverse = Decimal(str(getattr(maker_cfg, "maker_cancel_adverse_pct", 0.0002) or 0))
+        if hedge_is_buy and live > hedge_ref_price * (Decimal("1") + adverse):
+            return f"对冲买价上移 {live} > {hedge_ref_price}×(1+{adverse})"
+        if not hedge_is_buy and live < hedge_ref_price * (Decimal("1") - adverse):
+            return f"对冲卖价下移 {live} < {hedge_ref_price}×(1-{adverse})"
+        return None
+
+    def _maker_quote(
+        self,
+        *,
+        request: "ExecutionRequest",
+        maker_exchange: str,
+        maker_symbol: str,
+        maker_is_buy: bool,
+        hedge_exchange: str,
+        hedge_symbol: str,
+        hedge_is_buy: bool,
+        hedge_ref_price: Optional[Decimal],
+        maker_cfg: Any,
+    ):
+        """Passive price on the maker venue: join best bid (buy) / best ask (sell)."""
+        reason = self._hedge_adverse_reason(
+            hedge_exchange=hedge_exchange,
+            hedge_symbol=hedge_symbol,
+            hedge_is_buy=hedge_is_buy,
+            hedge_ref_price=hedge_ref_price,
+            maker_cfg=maker_cfg,
+        )
+        if reason:
+            return None, reason
+        book = self._fresh_book(maker_exchange, maker_symbol)
+        bid = getattr(getattr(book, "best_bid", None), "price", None) if book else None
+        ask = getattr(getattr(book, "best_ask", None), "price", None) if book else None
+        if bid is None or ask is None:
+            return None, "挂单所盘口不可用/过期"
+        bid = self.executor._to_decimal_value(bid)
+        ask = self.executor._to_decimal_value(ask)
+        if bid <= 0 or ask <= 0 or bid >= ask:
+            return None, f"挂单所盘口异常 bid={bid} ask={ask}"
+        price = bid if maker_is_buy else ask
+        # A passive quote must not be worse than the decision price of this leg.
+        decision = self.executor._to_decimal_value(request.price_buy if maker_is_buy else request.price_sell)
+        if decision > 0 and ((maker_is_buy and price > decision) or (not maker_is_buy and price < decision)):
+            return None, f"被动价 {price} 劣于决策价 {decision}"
+        return price, "ok"
+
+    def _maker_partial_is_hedgeable(self, request, quantity, min_first, min_second) -> bool:
+        if quantity <= 0:
+            return False
+        for minimum in (min_first, min_second):
+            if minimum and quantity < minimum:
+                return False
+        constraints = getattr(self.executor, "market_constraints", {}) or {}
+        item = constraints.get((request.buy_symbol or request.symbol).split("-")[0]) or {}
+        step = item.get("quantity_step")
+        if step and quantity % Decimal(str(step)):
+            return False
+        notionals = item.get("min_notional_by_exchange") or {}
+        for exchange, price in ((request.exchange_buy, request.price_buy), (request.exchange_sell, request.price_sell)):
+            minimum = notionals.get(exchange)
+            if minimum is not None and quantity * self.executor._to_decimal_value(price) < Decimal(str(minimum)):
+                return False
+        return True
+
+    def _prepare_maker_hedge_bounds(self, request, hedge_exchange, hedge_symbol, hedge_is_buy, quantity, maker_cfg):
+        """
+        The hedge runs after the maker fill, so the decision-time protection band may be stale.
+        Allow up to hedge_max_slippage_pct around the live hedge price, and lift the per-order
+        notional cap just enough for this hedge. The request is single-use, so the widened band
+        intentionally stays in effect for failed-leg retries of the same hedge. Returns a restore callback.
+        """
+        attr = "_stock_price_bound_buy" if hedge_is_buy else "_stock_price_bound_sell"
+        original = getattr(request, attr, None)
+        if original is None:
+            return None
+        book = self._fresh_book(hedge_exchange, hedge_symbol)
+        level = getattr(book, "best_ask" if hedge_is_buy else "best_bid", None) if book else None
+        if getattr(level, "price", None) is None:
+            return None
+        live = self.executor._to_decimal_value(level.price)
+        slip = Decimal(str(getattr(maker_cfg, "hedge_max_slippage_pct", 0.0005) or 0))
+        widened = live * (Decimal("1") + slip) if hedge_is_buy else live * (Decimal("1") - slip)
+        new_bound = max(original, widened) if hedge_is_buy else min(original, widened)
+        original_cap = getattr(request, "_stock_order_amount_usdc", None)
+        setattr(request, attr, new_bound)
+        if original_cap is not None:
+            reference = self.executor._to_decimal_value(request.price_buy if hedge_is_buy else request.price_sell)
+            needed = quantity * max(new_bound, reference) * Decimal("1.0001")
+            request._stock_order_amount_usdc = max(Decimal(str(original_cap)), needed)
+        logger.info(
+            f"[Maker→Taker] 对冲 {hedge_exchange} {'买' if hedge_is_buy else '卖'} {quantity}: "
+            f"实时价={live}, 保护价 {original} -> {new_bound}"
+        )
+
+        def restore():
+            setattr(request, attr, original)
+            if original_cap is not None:
+                request._stock_order_amount_usdc = original_cap
+        return restore
+
+    async def _wait_maker_fill(
+        self,
+        *,
+        order: OrderData,
+        adapter: ExchangeInterface,
+        symbol: str,
+        timeout: float,
+        target_quantity: Decimal,
+        hedge_exchange: str,
+        hedge_symbol: str,
+        hedge_is_buy: bool,
+        hedge_ref_price: Optional[Decimal],
+        maker_cfg: Any,
+        tag: str,
+    ):
+        """
+        Wait for a resting maker order. Cancels on timeout or adverse hedge-venue movement,
+        then returns the authoritative filled quantity of the terminal order.
+        """
+        executor = self.executor
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(1.0, float(timeout))
+        poll = max(0.05, float(getattr(maker_cfg, "maker_poll_interval_seconds", 0.5) or 0.5))
+        terminal = (OrderStatus.FILLED, OrderStatus.CANCELED, OrderStatus.REJECTED, OrderStatus.EXPIRED)
+        exit_reason = "timeout"
+        latest = None
+        while True:
+            try:
+                latest = await adapter.get_order(order.id, symbol)
+            except OrderStateUnknownError:
+                latest = None
+            if latest is not None:
+                order.filled = executor._to_decimal_value(latest.filled or 0)
+                order.status = latest.status
+                if latest.average is not None:
+                    order.average = latest.average
+                if latest.status in terminal:
+                    exit_reason = f"terminal:{getattr(latest.status, 'value', latest.status)}"
+                    return order.filled, exit_reason
+                if order.filled >= target_quantity:
+                    return order.filled, "filled"
+            reason = self._hedge_adverse_reason(
+                hedge_exchange=hedge_exchange,
+                hedge_symbol=hedge_symbol,
+                hedge_is_buy=hedge_is_buy,
+                hedge_ref_price=hedge_ref_price,
+                maker_cfg=maker_cfg,
+            )
+            if reason:
+                exit_reason = "adverse:" + reason
+                break
+            if loop.time() >= deadline:
+                exit_reason = "timeout"
+                break
+            await asyncio.sleep(min(poll, max(0.0, deadline - loop.time())))
+
+        logger.info(f"[Maker→Taker] [{tag}] 撤销挂单 {order.id}: {exit_reason}")
+        await executor._cancel_order(adapter, order.id, symbol)
+        # Confirm the terminal state; a fill can race the cancel.
+        confirm_deadline = loop.time() + 5.0
+        while True:
+            try:
+                latest = await adapter.get_order(order.id, symbol)
+            except OrderStateUnknownError:
+                latest = None
+            if latest is not None:
+                order.filled = executor._to_decimal_value(latest.filled or 0)
+                order.status = latest.status
+                if latest.average is not None:
+                    order.average = latest.average
+                if latest.status in terminal:
+                    return order.filled, exit_reason
+            if loop.time() >= confirm_deadline:
+                raise OrderStateUnknownError(
+                    executor._get_exchange_name(adapter) or "maker", order_id=order.id, client_id=order.client_id
+                )
+            await asyncio.sleep(0.25)
 
     async def execute_limit_limit_mode(
         self,
@@ -2494,7 +2801,7 @@ class OrderStrategyExecutor:
 
             if (getattr(buy_adapter, 'strict_order_state', False) or getattr(sell_adapter, 'strict_order_state', False)) and abs(buy_filled_dec - sell_filled_dec) > epsilon:
                 # Known unequal IOC fills leave exposure: quarantine the pair for manual reconciliation.
-                raise OrderStateUnknownError('arcus', order_id=f'{buy_order.id}/{sell_order.id}')
+                raise OrderStateUnknownError(f'{request.exchange_buy}/{request.exchange_sell}', order_id=f'{buy_order.id}/{sell_order.id}')
 
             buy_order.filled = buy_filled_dec
             sell_order.filled = sell_filled_dec
@@ -2687,14 +2994,14 @@ class OrderStrategyExecutor:
             )
             for outcome in latest:
                 if isinstance(outcome, Exception):
-                    raise OrderStateUnknownError('arcus') from outcome
+                    raise OrderStateUnknownError(f'{request.exchange_buy}/{request.exchange_sell}') from outcome
             buy_order, sell_order = latest
             difference = executor._to_decimal_value(sell_order.filled) - executor._to_decimal_value(buy_order.filled)
             if abs(difference) <= epsilon:
                 return Result(success=True, order_buy=buy_order, order_sell=sell_order,
                               success_quantity=min(buy_order.filled, sell_order.filled))
             if (difference > 0) != missing_buy:
-                raise OrderStateUnknownError('arcus')
+                raise OrderStateUnknownError(f'{request.exchange_buy}/{request.exchange_sell}')
             shortfall = abs(difference)
 
         shortfall_dec = executor._to_decimal_value(shortfall)

@@ -127,6 +127,15 @@ class ExchangeOrderModeConfig:
     force_limit_when_second_leg: bool = False  # 🔥 限价+市价模式中若成为第二腿则强制使用激进限价
     reuse_signal_price_when_second_leg: bool = False  # 🔧 第二腿激进限价是否复用信号价（默认重新拉最新盘口价）
     smart_second_leg_price: bool = False  # 🔧 智能盘口价格切换（根据第一腿表现自动选择价格来源）
+    # 🔥 Maker→Taker 模式（仅当本交易所为 limit 腿时生效）：
+    # 先在本所以 post-only 挂被动单（买=买一 / 卖=卖一），成交后立即在对手所市价对冲。
+    maker_mode: bool = False
+    post_only: bool = True  # 挂单使用 POST_ONLY，保证只做 maker
+    maker_price_mode: str = "join"  # join=挂在本方最优价；improve=在价差>1tick时向内改善1tick
+    maker_cancel_adverse_pct: float = 0.0002  # 对冲所价格相对决策价不利变动超过该比例(0.0002=0.02%)即撤单
+    maker_poll_interval_seconds: float = 0.5  # 挂单状态/对冲价检查间隔（注意交易所REST限频）
+    maker_hedge_partial_fill: bool = True  # 挂单部分成交且>=双方最小下单量时，直接对冲已成交部分
+    hedge_max_slippage_pct: float = 0.0005  # 对冲市价腿相对实时盘口的最大滑点（0.0005=0.05%）
 
     # 🔥 兼容旧配置格式
     buy_mode: Optional[str] = None  # 已废弃，保留兼容性

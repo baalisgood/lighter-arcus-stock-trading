@@ -7,6 +7,7 @@
 """
 
 from __future__ import annotations
+from core.adapters.exchanges.venues import is_lighter_family
 
 import asyncio
 import time
@@ -644,7 +645,7 @@ class UnifiedOrchestratorPositionAuditMixin:
         timeout_cfg = getattr(getattr(self.executor, "config", None), "order_execution", None)
         timeout = 10
         try:
-            if exchange.lower() == "lighter":
+            if is_lighter_family(exchange):
                 t = getattr(timeout_cfg, "lighter_market_order_timeout", None)
                 if t not in (None, 0):
                     timeout = max(1, int(t))

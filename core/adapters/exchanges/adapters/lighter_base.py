@@ -16,11 +16,24 @@ logger = get_exchange_logger("ExchangeAdapter.lighter")
 class LighterBase:
     """Lighter交易所基础类"""
 
+    # Venue identity defaults (legacy Lighter mainnet); instances override from config.
+    exchange_id = "lighter"
+    env_prefix = "LIGHTER"
+    chain_id = None
+    client_order_id_offset = 0
+
     # Lighter API端点
     MAINNET_URL = "https://mainnet.zklighter.elliot.ai"
     TESTNET_URL = "https://testnet.zklighter.elliot.ai"
     MAINNET_WS_URL = "wss://mainnet.zklighter.elliot.ai/stream"
     TESTNET_WS_URL = "wss://testnet.zklighter.elliot.ai/stream"
+    # Lighter on Robinhood Chain ("Lighter RH"): same API/signer, separate exchange.
+    RH_MAINNET_URL = "https://api.rh.lighter.xyz"
+    RH_TESTNET_URL = "https://api.rh-testnet.lighter.xyz"
+    RH_MAINNET_WS_URL = "wss://api.rh.lighter.xyz/stream"
+    MAINNET_CHAIN_ID = 304
+    TESTNET_CHAIN_ID = 300
+    RH_MAINNET_CHAIN_ID = 466324
 
     # 交易类型常量（来自 SignerClient）
     TX_TYPE_CREATE_ORDER = 14
@@ -73,6 +86,15 @@ class LighterBase:
         """
         self.config = config
         self.testnet = config.get("testnet", False)
+        # Exchange identity: "lighter" (mainnet) or "lighter_rh" (Robinhood Chain).
+        self.exchange_id = str(config.get("exchange_id") or "lighter").lower()
+        # Credentials are read from <ENV_PREFIX>_API_KEY_PRIVATE_KEY etc.; never shared between venues.
+        self.env_prefix = str(config.get("env_prefix") or self.exchange_id.upper())
+        self.chain_id = config.get("chain_id")
+        try:
+            self.client_order_id_offset = int(config.get("client_order_id_offset", 0) or 0)
+        except (TypeError, ValueError):
+            self.client_order_id_offset = 0
 
         # API 配置
         # 🔥 支持嵌套配置（从 api_config.auth 读取）或直接配置
@@ -96,7 +118,7 @@ class LighterBase:
         self.ws_url = self.TESTNET_WS_URL if self.testnet else self.MAINNET_WS_URL
 
         # 覆盖URL（如果配置中提供）
-        if "api_url" in config:
+        if config.get("api_url"):
             self.base_url = config["api_url"]
         
         # 🔥 支持多种ws_url字段名（兼容不同配置格式）
@@ -129,9 +151,9 @@ class LighterBase:
         
         # 🔥 优先从环境变量读取认证信息，其次使用配置文件
         import os
-        api_key_private_key = os.getenv('LIGHTER_API_KEY_PRIVATE_KEY') or self.api_key_private_key
+        api_key_private_key = os.getenv(f'{self.env_prefix}_API_KEY_PRIVATE_KEY') or self.api_key_private_key
         
-        env_account_index = os.getenv('LIGHTER_ACCOUNT_INDEX')
+        env_account_index = os.getenv(f'{self.env_prefix}_ACCOUNT_INDEX')
         if env_account_index is not None:
             account_index = int(env_account_index)
         elif self.account_index is not None:
@@ -139,7 +161,7 @@ class LighterBase:
         else:
             account_index = None
         
-        env_api_key_index = os.getenv('LIGHTER_API_KEY_INDEX')
+        env_api_key_index = os.getenv(f'{self.env_prefix}_API_KEY_INDEX')
         if env_api_key_index is not None:
             api_key_index = int(env_api_key_index)
         elif self.api_key_index is not None:
@@ -162,7 +184,7 @@ class LighterBase:
                     api_key_private_key=api_key_private_key,
                 )
                 
-                key_source = "环境变量" if os.getenv('LIGHTER_API_KEY_PRIVATE_KEY') else "配置文件"
+                key_source = "环境变量" if os.getenv(f'{self.env_prefix}_API_KEY_PRIVATE_KEY') else "配置文件"
                 logger.info(
                     f"✅ [LighterBase] SignerClient初始化成功: "
                     f"account_index={account_index}, api_key_index={api_key_index} (从{key_source})"
@@ -173,7 +195,8 @@ class LighterBase:
             logger.info("ℹ️  [LighterBase] 未配置认证信息，WebSocket将运行在公共模式")
 
         logger.info(
-            f"Lighter基础配置初始化完成 - URL: {self.base_url}, 测试网: {self.testnet}")
+            f"Lighter基础配置初始化完成 - exchange={self.exchange_id}, URL: {self.base_url}, "
+            f"chain_id={self.chain_id or 'sdk-default'}, 测试网: {self.testnet}")
 
     async def _close_signer_client(self):
         """每个模块只关闭自己持有的 signer，重复断开不会再次关闭。"""
@@ -198,6 +221,18 @@ class LighterBase:
         api_key_index_val = api_key_index if api_key_index is not None else 0
         api_private_keys = {api_key_index_val: api_key_private_key}
 
+        chain_id = getattr(self, "chain_id", None)
+        if chain_id is not None:
+            try:
+                # Keep base URL and chain ID together: a tx signed for one Lighter venue is rejected by the other.
+                return SignerClient(
+                    url=base_url,
+                    account_index=account_index,
+                    api_private_keys=api_private_keys,
+                    chain_id=int(chain_id),
+                )
+            except TypeError:
+                pass
         try:
             # 新版签名
             return SignerClient(
