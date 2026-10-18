@@ -7,6 +7,7 @@
 - 确保零延迟、零阻塞
 """
 
+from core.adapters.exchanges.venues import is_lighter_family
 import asyncio
 import logging
 from typing import Dict, Callable, Optional, Any
@@ -196,9 +197,9 @@ class DataReceiver:
                 # ============================================================
                 
                 # 🚀 Lighter特殊处理：使用批量订阅模式（参考EdgeX的实现）
-                if exchange == "lighter":
-                    # 🔥 固定 exchange 值，避免闭包变量捕获问题
-                    exchange_name = "lighter"
+                if is_lighter_family(exchange):
+                    # 🔥 固定 exchange 值，避免闭包变量捕获问题（lighter / lighter_rh 各自独立）
+                    exchange_name = exchange
                     
                     # 创建Lighter专用的统一回调（只有一个参数）
                     # 🔥 使用默认参数绑定，避免闭包捕获问题
@@ -208,7 +209,7 @@ class DataReceiver:
                             # orderbook.symbol 可能是Lighter格式（如 "BTC"）或标准格式（如 "BTC-USDC-PERP"）
                             # 需要尝试转换，如果转换失败则使用原始symbol
                             try:
-                                std_symbol = self.symbol_converter.convert_from_exchange(orderbook.symbol, "lighter")
+                                std_symbol = self.symbol_converter.convert_from_exchange(orderbook.symbol, _exchange_name)
                             except Exception:
                                 # 如果转换失败，可能是已经是标准格式，直接使用
                                 std_symbol = orderbook.symbol
@@ -243,7 +244,7 @@ class DataReceiver:
                         """Lighter ticker统一回调（只接收ticker参数）"""
                         try:
                             # 转换symbol到标准格式
-                            std_symbol = receiver_self.symbol_converter.convert_from_exchange(ticker.symbol, "lighter")
+                            std_symbol = receiver_self.symbol_converter.convert_from_exchange(ticker.symbol, _exchange_name)
                             
                             # 检查symbol是否在监控列表中
                             if std_symbol in symbols:

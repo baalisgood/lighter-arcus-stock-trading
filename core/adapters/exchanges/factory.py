@@ -60,6 +60,15 @@ class ExchangeFactory:
             from .adapters.variational import VariationalAdapter
             from .adapters.grvt import GRVTAdapter
             from .adapters.arcus import ArcusAdapter
+            from .adapters.lighter_rh import LighterRHAdapter
+
+            self.register_adapter(
+                exchange_id="lighter_rh", adapter_class=LighterRHAdapter,
+                exchange_type=ExchangeType.PERPETUAL, name="Lighter RH",
+                description="Lighter on Robinhood Chain 永续合约交易所 (robinhoodchain.lighter.xyz)",
+                supported_features=["perpetual_trading", "websocket", "orderbook", "ticker", "trades", "user_data"],
+                default_config={"testnet": False, "default_leverage": 1, "enable_websocket": True},
+            )
 
             self.register_adapter(
                 exchange_id="arcus", adapter_class=ArcusAdapter,
@@ -418,7 +427,7 @@ class ExchangeFactory:
         api_key = kwargs.get('api_key', '')
         api_secret = kwargs.get('api_secret', '')
 
-        if exchange_id != "arcus" and (not api_key or not api_secret):
+        if exchange_id not in ("arcus", "lighter_rh") and (not api_key or not api_secret):
             raise ValueError(f"创建 {exchange_id} 适配器需要 api_key 和 api_secret")
 
         # 合并默认配置和用户配置

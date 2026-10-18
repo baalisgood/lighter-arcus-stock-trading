@@ -102,6 +102,10 @@ class SimpleSymbolConverter:
         },
     }
     
+    # Lighter Robinhood Chain 与 Lighter 主网使用相同的符号格式
+    EXCHANGE_FORMATS['lighter_rh'] = dict(EXCHANGE_FORMATS['lighter'])
+    DIRECT_MAPPING['lighter_rh'] = dict(DIRECT_MAPPING['lighter'])
+
     _custom_mappings_loaded = False
     
     def __init__(self, logger: Optional[logging.Logger] = None):
@@ -245,7 +249,7 @@ class SimpleSymbolConverter:
         self.logger.debug(f"🔄 未找到反向映射: {exchange_symbol} ({exchange})，尝试自动推断")
         
         # 4. 尝试自动推断（基于交易所格式）
-        if exchange == 'lighter':
+        if exchange in ('lighter', 'lighter_rh'):
             # Lighter: BTC -> BTC-USDC-PERP
             return f"{exchange_symbol}-USDC-PERP"
         elif exchange == 'edgex':

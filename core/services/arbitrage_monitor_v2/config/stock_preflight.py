@@ -15,6 +15,38 @@ def positive(value, label, *, zero=False):
         raise ValueError(f"Invalid {label}") from None
 
 
+STOCK_COUNTER_VENUES = ('arcus', 'lighter_rh')
+
+
+def stock_venues(order_modes):
+    """Stock pair = Lighter mainnet + exactly one counter venue (Arcus legacy or Lighter RH)."""
+    venues = set(order_modes or {}) - {'default'}
+    if len(venues) != 2 or 'lighter' not in venues or not (venues - {'lighter'}) <= set(STOCK_COUNTER_VENUES):
+        raise ValueError('Stock profile requires lighter + one of ' + '/'.join(STOCK_COUNTER_VENUES))
+    return venues
+
+
+def validate_stock_order_modes(order_modes, venues):
+    """market/market, or maker->taker: exactly one post-only maker limit leg + one market hedge leg."""
+    modes = {venue: (order_modes.get(venue) or {}) for venue in venues}
+    kinds = sorted(item.get('order_mode') for item in modes.values())
+    if kinds == ['market', 'market']:
+        return
+    if kinds != ['limit', 'market']:
+        raise ValueError('Stock protected execution supports market/market or maker(limit)+taker(market) only')
+    maker = next(item for item in modes.values() if item.get('order_mode') == 'limit')
+    taker = next(item for item in modes.values() if item.get('order_mode') == 'market')
+    if not maker.get('maker_mode') or not maker.get('post_only'):
+        raise ValueError('Stock limit leg must be a post-only maker (maker_mode: true, post_only: true)')
+    if maker.get('force_sequential_limit') or taker.get('force_limit_when_second_leg'):
+        raise ValueError('Maker->taker forbids sequential/aggressive limit overrides')
+    for key, upper in (('maker_cancel_adverse_pct', 1), ('hedge_max_slippage_pct', 1)):
+        if key in maker and not 0 <= positive(maker[key], key, zero=True) < upper:
+            raise ValueError('Invalid ' + key)
+    if 'maker_poll_interval_seconds' in maker:
+        positive(maker['maker_poll_interval_seconds'], 'maker poll interval')
+
+
 def merge_stock_grid(default, specific):
     merged = {**default, **specific}
     for key in ("basis_config", "stock_session"):
@@ -56,8 +88,10 @@ def validate_stock_profiles(segmented_path, execution_path):
         raise ValueError('Decision/execution fees differ')
     if strategy['decision'].get('exchange_order_modes') != settings['exchange_order_modes']:
         raise ValueError('Decision/execution order modes differ')
-    if any(settings['exchange_order_modes'].get(exchange, {}).get('order_mode') != 'market' for exchange in ('lighter', 'arcus')):
-        raise ValueError('Stock protected execution supports market mode only')
+    venues = stock_venues(settings['exchange_order_modes'])
+    if set(fees) - {'default'} != venues:
+        raise ValueError('Fee config must cover exactly the stock venues')
+    validate_stock_order_modes(settings['exchange_order_modes'], venues)
     for exchange, rates in fees.items():
         for name in ('limit_fee_rate', 'market_fee_rate'):
             positive(rates[name], exchange + name, zero=True)
@@ -113,7 +147,7 @@ def validate_stock_profiles(segmented_path, execution_path):
     if set(constraints_by_symbol) != {name.split('-')[0] for name in symbols}:
         raise ValueError('Market constraints must cover exactly the active stock symbols')
     for symbol, constraints in constraints_by_symbol.items():
-        if set(constraints.get('min_notional_by_exchange', {})) != {'lighter', 'arcus'}:
+        if set(constraints.get('min_notional_by_exchange', {})) != venues:
             raise ValueError('Market constraints require both venue minimum notionals')
         step = positive(constraints['quantity_step'], 'quantity step')
         positive(constraints['min_quantity'], 'minimum quantity')

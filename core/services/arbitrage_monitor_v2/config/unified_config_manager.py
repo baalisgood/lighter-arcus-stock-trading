@@ -364,6 +364,23 @@ class UnifiedConfigManager:
                             f"⚙️ [配置管理] {exchange_name}: 已启用 smart_second_leg_price (智能盘口价格切换)"
                         )
                 
+                # 🔥 Maker→Taker 参数
+                for key, caster in (
+                    ('maker_mode', bool), ('post_only', bool), ('maker_price_mode', str),
+                    ('maker_cancel_adverse_pct', float), ('maker_poll_interval_seconds', float),
+                    ('maker_hedge_partial_fill', bool), ('hedge_max_slippage_pct', float),
+                ):
+                    if key in mode_data and mode_data.get(key) is not None:
+                        try:
+                            setattr(exchange_config, key, caster(mode_data.get(key)))
+                        except (TypeError, ValueError):
+                            logger.warning(f"⚠️ [配置管理] {exchange_name} {key} 配置无效({mode_data.get(key)})，使用默认值")
+                if getattr(exchange_config, 'maker_mode', False) and order_mode == 'limit':
+                    logger.info(
+                        f"⚙️ [配置管理] {exchange_name}: Maker→Taker 模式 (post_only={exchange_config.post_only}, "
+                        f"adverse_cancel={exchange_config.maker_cancel_adverse_pct}, hedge_slippage={exchange_config.hedge_max_slippage_pct})"
+                    )
+
                 self.config.execution.exchange_order_modes[exchange_name] = exchange_config
             logger.info(
                 "✅ [配置管理] 交易所下单模式已加载: "

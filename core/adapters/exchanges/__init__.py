@@ -49,6 +49,7 @@ from .adapters.binance import BinanceAdapter
 from .adapters.paradex import ParadexAdapter
 from .adapters.variational import VariationalAdapter
 from .adapters.arcus import ArcusAdapter
+from .adapters.lighter_rh import LighterRHAdapter
 
 __all__ = [
     # 核心接口和基类
@@ -84,6 +85,7 @@ __all__ = [
     'ParadexAdapter',
     'VariationalAdapter',
     'ArcusAdapter',
+    'LighterRHAdapter',
 ]
 
 # 版本信息

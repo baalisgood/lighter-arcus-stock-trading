@@ -948,7 +948,7 @@ class LighterWebSocket(LighterBase):
             error_message: 错误信息
         """
         if self._backoff_controller:
-            self._backoff_controller.register_error("lighter", error_code, error_message)
+            self._backoff_controller.register_error(self.exchange_id, error_code, error_message)
     
     async def send_tx_batch(
         self,
@@ -2173,7 +2173,7 @@ class LighterWebSocket(LighterBase):
             import aiohttp
             async with aiohttp.ClientSession() as session:
                 async with session.get(
-                    "https://mainnet.zklighter.elliot.ai/",
+                    self.base_url.rstrip("/") + "/",
                     timeout=aiohttp.ClientTimeout(total=5)
                 ) as response:
                     return response.status == 200
