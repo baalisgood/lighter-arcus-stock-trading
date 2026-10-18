@@ -85,6 +85,10 @@ risk_control:
       - NVDA
       - INTC
       - SPCX
+      - BTC
+      - ETH
+      - SOL
+      - HYPE
       enabled: true
       window_seconds: 300
       threshold_pct: 4
@@ -353,6 +357,102 @@ symbol_configs:
       split_order_amount_usdc: 250
     risk_config:
       max_position_value: 1500.0
+  BTC-USDC-PERP:
+    enabled: true
+    grid_config:
+      initial_spread_threshold: 0.05
+      grid_step: 0.03
+      max_segments: 3
+      profit_per_segment: 0.03
+      slippage_tolerance: 0.0001
+      require_orderbook_liquidity: true
+      min_orderbook_quantity: null
+      stock_session:
+        enabled: false
+    quantity_config:
+      base_quantity: 0.00609
+      quantity_mode: value
+      quantity_precision: 5
+      target_value_usdc: 500
+      min_exchange_order_qty:
+        default: 0.0002
+        lighter: 7.0e-05
+        lighter_rh: 0.0002
+      split_order_amount_usdc: 250
+    risk_config:
+      max_position_value: 1500.0
+  ETH-USDC-PERP:
+    enabled: true
+    grid_config:
+      initial_spread_threshold: 0.05
+      grid_step: 0.03
+      max_segments: 3
+      profit_per_segment: 0.03
+      slippage_tolerance: 0.0001
+      require_orderbook_liquidity: true
+      min_orderbook_quantity: null
+      stock_session:
+        enabled: false
+    quantity_config:
+      base_quantity: 0.2064
+      quantity_mode: value
+      quantity_precision: 4
+      target_value_usdc: 500
+      min_exchange_order_qty:
+        default: 0.005
+        lighter: 0.002
+        lighter_rh: 0.005
+      split_order_amount_usdc: 250
+    risk_config:
+      max_position_value: 1500.0
+  SOL-USDC-PERP:
+    enabled: true
+    grid_config:
+      initial_spread_threshold: 0.05
+      grid_step: 0.03
+      max_segments: 3
+      profit_per_segment: 0.03
+      slippage_tolerance: 0.0001
+      require_orderbook_liquidity: true
+      min_orderbook_quantity: null
+      stock_session:
+        enabled: false
+    quantity_config:
+      base_quantity: 4.813
+      quantity_mode: value
+      quantity_precision: 3
+      target_value_usdc: 500
+      min_exchange_order_qty:
+        default: 0.1
+        lighter: 0.055
+        lighter_rh: 0.1
+      split_order_amount_usdc: 250
+    risk_config:
+      max_position_value: 1500.0
+  HYPE-USDC-PERP:
+    enabled: true
+    grid_config:
+      initial_spread_threshold: 0.05
+      grid_step: 0.03
+      max_segments: 3
+      profit_per_segment: 0.03
+      slippage_tolerance: 0.0001
+      require_orderbook_liquidity: true
+      min_orderbook_quantity: null
+      stock_session:
+        enabled: false
+    quantity_config:
+      base_quantity: 6.32
+      quantity_mode: value
+      quantity_precision: 2
+      target_value_usdc: 500
+      min_exchange_order_qty:
+        default: 0.1
+        lighter: 0.07
+        lighter_rh: 0.1
+      split_order_amount_usdc: 250
+    risk_config:
+      max_position_value: 1500.0
 market_constraints:
   MU:
     quantity_step: '0.0001'
@@ -387,6 +487,30 @@ market_constraints:
   SPCX:
     quantity_step: '0.0001'
     min_quantity: '0.04'
+    min_notional_by_exchange:
+      lighter: 10
+      lighter_rh: 10
+  BTC:
+    quantity_step: '0.00001'
+    min_quantity: '0.0002'
+    min_notional_by_exchange:
+      lighter: 10
+      lighter_rh: 10
+  ETH:
+    quantity_step: '0.0001'
+    min_quantity: '0.005'
+    min_notional_by_exchange:
+      lighter: 10
+      lighter_rh: 10
+  SOL:
+    quantity_step: '0.001'
+    min_quantity: '0.1'
+    min_notional_by_exchange:
+      lighter: 10
+      lighter_rh: 10
+  HYPE:
+    quantity_step: '0.01'
+    min_quantity: '0.1'
     min_notional_by_exchange:
       lighter: 10
       lighter_rh: 10

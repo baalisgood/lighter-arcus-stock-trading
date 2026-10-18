@@ -13,6 +13,22 @@ Arcus 已被 **Lighter on Robinhood Chain**（`lighter_rh`，<https://robinhoodc
 - **RH 要点**：REST `https://api.rh.lighter.xyz`，WS `wss://api.rh.lighter.xyz/stream`，chain ID `466324`；账户、API Key、nonce、market_id 均不与主网通用；API Key 索引 0–3 与 157 保留，请用 4–156 或 158–254；抵押品为 USDG（系统内仍按 USDC 计价）。
 - **风险提示**：Standard 账户 REST 仅 60 次/分钟，且 maker 有 200ms 延迟、taker 300ms 延迟——订单状态轮询已限流，但仍建议先跑 `monitor`，必要时升级 Plus 档（手续费 0.005%/0.005%，需同步修改 `exchange_fees`）。基差 EMA 状态单独保存在 `data/stock_basis_state_lighter_rh.json`。阈值（T1=0.12% 等）按 Arcus 时代设定，费用归零后可在监控数据基础上下调。
 
+### 增删交易对（BTC / ETH / SOL / HYPE 等）
+
+`scripts/manage_symbols.py` 会一次性同步 4 个 RH 配置文件（策略、执行、监控、多所配对），自动从两所公开接口读取精度、最小下单量和最小名义金额，写入前先跑预检，失败不落盘：
+
+```sh
+.venv/bin/python scripts/manage_symbols.py list
+.venv/bin/python scripts/manage_symbols.py add BTC ETH SOL HYPE           # 加密币：24x7，不使用美股时段阈值
+.venv/bin/python scripts/manage_symbols.py add AAPL --stock               # 美股代币：沿用美股时段/盘后阈值
+.venv/bin/python scripts/manage_symbols.py add BTC --replace --threshold 0.04 --step 0.02 --order-value 100
+.venv/bin/python scripts/manage_symbols.py remove HYPE                     # 删除前先确认两所该币持仓已平
+```
+
+- 加密币默认 T1=0.05%、网格间距 0.03%（美股 0.12%/0.07%），请按 monitor 数据调整；改完需重启进程。
+- 只有两所都上线的永续市场才能添加（例如 BNB 目前不在 RH 上，会被拒绝）。
+- 交易对越多，RH Standard 档 60 次/分钟的 REST 额度越紧张，建议同时启用的品种不要太多。
+
 ## Install and run
 
 Python 3.12 on macOS or Linux:

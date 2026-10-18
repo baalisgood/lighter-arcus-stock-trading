@@ -9,6 +9,10 @@ symbols:
 - NVDA-USDC-PERP
 - INTC-USDC-PERP
 - SPCX-USDC-PERP
+- BTC-USDC-PERP
+- ETH-USDC-PERP
+- SOL-USDC-PERP
+- HYPE-USDC-PERP
 thresholds:
   min_spread_pct: 0.1
   min_funding_rate_diff: 0.01
