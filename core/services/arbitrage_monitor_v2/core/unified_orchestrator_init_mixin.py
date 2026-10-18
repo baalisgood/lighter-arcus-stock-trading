@@ -808,6 +808,8 @@ class UnifiedOrchestratorInitMixin:
         self.ui_manager = UIManager(self.debug, self.scroller)
         self.ui_controller = OrchestratorUIController(self, logger)
         self.spread_pipeline = SpreadPipeline(self)
+        from core.services.arbitrage_monitor_v2.core.spread_sampler import SpreadSampler
+        self.spread_sampler = SpreadSampler()
         self.reduce_only_probe_service = ReduceOnlyProbeService(self)
         self.debug_cli_printer: Optional[DebugStatePrinter] = None
 

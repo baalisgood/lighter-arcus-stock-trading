@@ -1264,7 +1264,8 @@ class LighterWebSocket(LighterBase):
             if raw_timestamp:
                 logger.debug(f"[Lighter] 订单簿timestamp原始值: {raw_timestamp} (type={type(raw_timestamp)})")
             else:
-                logger.warning(f"⚠️ [Lighter] 订单簿缺少timestamp字段！data keys={list(orderbook_data.keys())}")
+                # 快照常只带 last_updated_at，由 _parse_orderbook_timestamp 兜底解析
+                logger.debug(f"[Lighter] 订单簿无timestamp字段，尝试 last_updated_at | keys={list(orderbook_data.keys())}")
             
             parsed_timestamp = self._parse_orderbook_timestamp(orderbook_data)
             if parsed_timestamp:

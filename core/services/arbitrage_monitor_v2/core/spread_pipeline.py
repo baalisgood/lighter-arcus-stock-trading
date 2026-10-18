@@ -548,6 +548,13 @@ class SpreadPipeline:
 
         orc._record_price_sample(symbol_key, opening_spread)
         orc._capture_decision_snapshot(symbol_key, opening_spread)
+        sampler = getattr(orc, "spread_sampler", None)
+        if sampler is not None:
+            try:
+                adjusted = orc.decision_engine.adjusted_open_spread(symbol_key, opening_spread)
+            except Exception:
+                adjusted = None
+            sampler.record(symbol_key, opening_spread, closing_spread, adjusted)
 
         if (
             not has_position
